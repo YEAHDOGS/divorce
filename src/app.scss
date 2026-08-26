@@ -1,0 +1,81 @@
+// Custom SCSS styles go here
+// Tailwind utility classes are available from app.css
+@use "./styles/variables" as *;
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --color-neon-red: #{$color-neon-red};
+  --color-neon-red-rgb: #{$color-neon-red-rgb};
+  --bg-app: #{$bg-app};
+  --bg-card: #{$bg-card};
+  --bg-card-hover: #{$bg-card-hover};
+  --color-text: #{$color-text};
+  --color-muted: #{$color-muted};
+  font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+}
+
+
+body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  /* Use dvh (dynamic viewport height) so the background fills correctly on
+       mobile even when the browser address bar is visible */
+  height: 100dvh;
+  min-height: 100vh;
+  /* fallback for browsers without dvh support */
+  overflow-x: hidden;
+  overflow-y: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  -o-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+}
+
+/* ── Custom Global Scrollbars (Batman Beyond Theme: Black, White, Red) ── */
+
+/* Webkit browsers (Chrome, Edge, Safari, Opera) */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-app, #050508);
+  border-left: 1px solid rgba(var(--color-neon-red-rgb, 255, 51, 68), 0.15);
+  border-top: 1px solid rgba(var(--color-neon-red-rgb, 255, 51, 68), 0.15);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-neon-red, #ff3344);
+  border: 2px solid var(--bg-app, #050508);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text, #ffffff);
+  border-color: var(--color-neon-red, #ff3344);
+}
+
+/* Firefox standard styling */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-neon-red, #ff3344) var(--bg-app, #050508);
+}
+
+/* Hide scrollbars but keep scrolling functionality */
+.scrollbar-none {
+  scrollbar-width: none !important;
+
+  &::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
+}

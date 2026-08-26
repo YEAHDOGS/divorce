@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Stylized Geometric Dog Face -->
+  <polygon points="50,15 15,35 25,75 50,95 75,75 85,35" stroke="currentColor" fill="none"/>
+  <!-- Ears -->
+  <polygon points="15,35 5,5 30,22" stroke="currentColor" fill="currentColor" fill-opacity="0.1"/>
+  <polygon points="85,35 95,5 70,22" stroke="currentColor" fill="currentColor" fill-opacity="0.1"/>
+  <!-- Eyes -->
+  <line x1="35" y1="45" x2="42" y2="45" stroke="currentColor"/>
+  <line x1="65" y1="45" x2="58" y2="45" stroke="currentColor"/>
+  <!-- Nose/Muzzle -->
+  <polygon points="50,60 43,52 57,52" stroke="currentColor" fill="currentColor"/>
+  <line x1="50" y1="60" x2="50" y2="72" stroke="currentColor"/>
+  <path d="M43,72 C46,75 50,75 50,72 C50,75 54,75 57,72" stroke="currentColor"/>
+</svg>

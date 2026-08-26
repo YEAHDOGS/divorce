@@ -1,0 +1,23 @@
+{
+  "meta": {
+    "title": "DOGS - Modern Svelte Template",
+    "description": "A lightweight, high-performance, responsive Svelte template with TailwindCSS, SCSS, and Multi-Language, Localization, and Internationalization (abbrev. i18n)."
+  },
+  "app": {
+    "title": "DOGS",
+    "tagline": "A premium, minimalist Svelte boilerplate crafted for speed and responsiveness.",
+    "intro": "This template is built by CaptainBrando for the homies. Fully optimized, lightweight, and ready for deployment.",
+    "features": {
+      "i18n": "Internationalization",
+      "i18n_desc": "Built-in localization with svelte-i18n supporting async loaded dictionary files.",
+      "responsive": "Viewport Matrix",
+      "responsive_desc": "Agile layout styles that seamlessly scale from mobile screens up to TVs.",
+      "styles": "Tailwind & SCSS",
+      "styles_desc": "Powered by Tailwind CSS v4 and modular SCSS styles."
+    },
+    "footer": {
+      "made_by": "Crafted by",
+      "for_homies": "for the homies"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "divorce",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest",
+    "test:ui": "vitest run --ui",
+    "test:ui:coverage": "vitest run --ui --coverage"
+  },
+  "devDependencies": {
+    "vite": "^8.1.1",
+    "svelte": "^5.56.4",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "tailwindcss": "^4.3.2",
+    "sass-embedded": "^1.100.0",
+    "@tailwindcss/vite": "^4.3.2",
+    "@vitejs/plugin-legacy": "^8.1.0",
+    "vitest": "^4.1.10",
+    "jsdom": "^29.1.1",
+    "@testing-library/svelte": "^5.4.2",
+    "@testing-library/jest-dom": "^6.9.1"
+  },
+  "dependencies": {
+    "@lucide/svelte": "^1.0.1",
+    "svelte-i18n": "^4.0.1"
+  }
+}
