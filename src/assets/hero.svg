@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 400" fill="none">
+  <!-- Definitions for Gradients -->
+  <defs>
+    <linearGradient id="heroGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff3344" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#050508" stop-opacity="0.1"/>
+    </linearGradient>
+    <linearGradient id="heroGrad2" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#ff3344" stop-opacity="0.2"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff3344" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#ff3344" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background Glow -->
+  <circle cx="250" cy="200" r="180" fill="url(#glow)"/>
+
+  <!-- Swarm Nodes & Connections -->
+  <!-- Main Grid Lines -->
+  <path d="M150,120 L250,80 L350,120 L380,220 L250,300 L120,220 Z" stroke="url(#heroGrad2)" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <path d="M250,80 L250,300 M150,120 L380,220 M350,120 L120,220" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+
+  <!-- Glowing Nodes -->
+  <circle cx="250" cy="80" r="8" fill="#ff3344"/>
+  <circle cx="150" cy="120" r="6" fill="#ffffff"/>
+  <circle cx="350" cy="120" r="6" fill="#ffffff"/>
+  <circle cx="120" cy="220" r="8" fill="#ff3344"/>
+  <circle cx="380" cy="220" r="8" fill="#ffffff"/>
+  <circle cx="250" cy="300" r="10" fill="url(#heroGrad1)" stroke="#ff3344" stroke-width="2"/>
+
+  <!-- Orbiting Rings -->
+  <circle cx="250" cy="200" r="120" stroke="rgba(255, 51, 68, 0.4)" stroke-width="2" stroke-dasharray="200 40"/>
+  <circle cx="250" cy="200" r="140" stroke="rgba(255, 255, 255, 0.2)" stroke-width="1" stroke-dasharray="10 180 50 20"/>
+
+  <!-- Additional tech accents -->
+  <rect x="235" y="185" width="30" height="30" rx="4" stroke="#ff3344" stroke-width="1" fill="none" transform="rotate(45 250 200)"/>
+  <circle cx="250" cy="200" r="4" fill="#ffffff"/>
+</svg>
