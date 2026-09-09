@@ -36,7 +36,7 @@
  * Single-process staging storage; not a production database.
  */
 
-import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
+import { createHmac, createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -71,6 +71,7 @@ export const WEBHOOK_ERROR_CODES = Object.freeze({
   EVENT_INVALID: 'EVENT_INVALID',
   SESSION_INVALID: 'SESSION_INVALID',
   PACKET_NOT_READY: 'PACKET_NOT_READY',
+  PACKET_INTEGRITY_FAILED: 'PACKET_INTEGRITY_FAILED',
   RATE_LIMITED: RATE_LIMIT_ERROR_CODE,
 });
 
@@ -325,16 +326,70 @@ export function savePacketHtml(dataDir, paymentIntentId, html) {
   const safe = sanitizeId(paymentIntentId);
   if (!safe) fail(WEBHOOK_ERROR_CODES.EVENT_INVALID, 'webhook: unsafe payment intent id.');
   writeFileSync(join(p.packetsDir, `${safe}.html`), html, 'utf8');
-  recordLedger(dataDir, { kind: 'packet_ready', paymentIntentId: safe });
+  // Integrity sidecar: sha256 of the exact bytes served. loadPacketHtml
+  // re-computes and compares before serving — a tampered or truncated
+  // file on disk is refused instead of handed to the payer.
+  const sha256 = packetDigest(html);
+  writeFileSync(join(p.packetsDir, `${safe}.sha256`), sha256, 'utf8');
+  recordLedger(dataDir, { kind: 'packet_ready', paymentIntentId: safe, sha256 });
 }
 
+/**
+ * sha256 hex digest of the packet bytes. Exported so tests can pin the
+ * algorithm and the download path can be verified independently.
+ * @param {string} html — packet HTML bytes as written by savePacketHtml
+ * @returns {string} lowercase hex sha256
+ */
+export function packetDigest(html) {
+  return createHash('sha256').update(html, 'utf8').digest('hex');
+}
+
+/** Read the integrity sidecar written by savePacketHtml; null if absent. */
+export function readPacketDigest(dataDir, paymentIntentId) {
+  const p = ensureDataDir(dataDir);
+  const safe = sanitizeId(paymentIntentId);
+  if (!safe) return null;
+  const file = join(p.packetsDir, `${safe}.sha256`);
+  if (!existsSync(file)) return null;
+  const digest = readFileSync(file, 'utf8').trim();
+  return /^[0-9a-f]{64}$/.test(digest) ? digest : null;
+}
+
+/**
+ * Load the paid packet HTML, verifying its integrity digest first.
+ * @returns {string|null} the HTML, or null when no packet exists yet
+ * @throws {WebhookError} PACKET_INTEGRITY_FAILED when the file on disk no
+ *   longer matches the digest recorded at generation time (tamper or
+ *   truncation). Fail closed: never serve bytes we cannot vouch for.
+ */
 export function loadPacketHtml(dataDir, paymentIntentId) {
   const p = ensureDataDir(dataDir);
   const safe = sanitizeId(paymentIntentId);
   if (!safe) return null;
   const file = join(p.packetsDir, `${safe}.html`);
   if (!existsSync(file)) return null;
-  return readFileSync(file, 'utf8');
+  const html = readFileSync(file, 'utf8');
+  const expected = readPacketDigest(dataDir, safe);
+  const actual = packetDigest(html);
+  if (!expected || !timingSafeDigestEqual(actual, expected)) {
+    fail(
+      WEBHOOK_ERROR_CODES.PACKET_INTEGRITY_FAILED,
+      'webhook: packet failed its integrity check — the paid receipt is intact, request a fresh download.'
+    );
+  }
+  return html;
+}
+
+/**
+ * Constant-time digest comparison (both values are already validated
+ * lowercase hex from readPacketDigest / packetDigest).
+ */
+function timingSafeDigestEqual(actual, expected) {
+  if (typeof actual !== 'string' || typeof expected !== 'string') return false;
+  if (actual.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < actual.length; i++) diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
 }
 
 /* ── Event → receipt → packet pipeline ───────────────────────────── */
@@ -555,7 +610,21 @@ export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR } = {})
         error: { code: ERROR_CODES.METHOD_NOT_ALLOWED, message: 'Use GET.' },
       });
     }
-    const html = loadPacketHtml(dataDir, paymentIntentId);
+    let html;
+    try {
+      html = loadPacketHtml(dataDir, paymentIntentId);
+    } catch (e) {
+      if (e instanceof WebhookError && e.code === WEBHOOK_ERROR_CODES.PACKET_INTEGRITY_FAILED) {
+        recordLedger(dataDir, { kind: 'packet_integrity_failed', paymentIntentId });
+        return sendJson(res, 502, {
+          error: {
+            code: e.code,
+            message: e.message + ' The paid receipt is intact — ask support to re-issue the download.',
+          },
+        });
+      }
+      throw e;
+    }
     if (html === null) {
       return sendJson(res, 404, {
         error: {

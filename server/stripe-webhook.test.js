@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -30,6 +30,8 @@ import {
   webhookProvider,
   savePacketHtml,
   loadPacketHtml,
+  packetDigest,
+  readPacketDigest,
   sanitizeId,
   fulfillSucceededPayment,
   parseEvent,
@@ -673,5 +675,53 @@ describe('startCheckoutServer rate gating (integration)', () => {
       expect(res.status).not.toBe(429);
       await res.text();
     }
+  });
+});
+
+/* ── Packet download integrity (sha256 sidecar) ───────────────────── */
+
+describe('packet integrity digests', () => {
+  it('packetDigest is a deterministic 64-char lowercase hex sha256', () => {
+    const a = packetDigest('hello packet');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(packetDigest('hello packet')).toBe(a);
+    expect(packetDigest('hello packet!')).not.toBe(a);
+  });
+
+  it('savePacketHtml writes a digest sidecar matching the packet bytes', () => {
+    const html = '<!DOCTYPE html><html><body>PACKET</body></html>';
+    savePacketHtml(dataDir, 'pi_sim_dig_1', html);
+    expect(readPacketDigest(dataDir, 'pi_sim_dig_1')).toBe(packetDigest(html));
+  });
+
+  it('loadPacketHtml throws PACKET_INTEGRITY_FAILED on a tampered packet file', () => {
+    savePacketHtml(dataDir, 'pi_sim_dig_2', '<html>TAMPER-ME</html>');
+    const file = join(dataDir, 'packets', 'pi_sim_dig_2.html');
+    writeFileSync(file, '<html>TAMPERED-BYTES</html>', 'utf8');
+    expect(() => loadPacketHtml(dataDir, 'pi_sim_dig_2')).toThrowError(
+      expect.objectContaining({ code: WEBHOOK_ERROR_CODES.PACKET_INTEGRITY_FAILED })
+    );
+  });
+
+  it('loadPacketHtml throws PACKET_INTEGRITY_FAILED when the sidecar is missing', () => {
+    savePacketHtml(dataDir, 'pi_sim_dig_3', '<html>NO-SIDECAR</html>');
+    rmSync(join(dataDir, 'packets', 'pi_sim_dig_3.sha256'));
+    expect(() => loadPacketHtml(dataDir, 'pi_sim_dig_3')).toThrowError(
+      expect.objectContaining({ code: WEBHOOK_ERROR_CODES.PACKET_INTEGRITY_FAILED })
+    );
+  });
+
+  it('download handler 502s (never serves) a tampered packet and logs it', async () => {
+    savePacketHtml(dataDir, 'pi_sim_dig_4', '<html>INTACT</html>');
+    writeFileSync(join(dataDir, 'packets', 'pi_sim_dig_4.html'), '<html>SWAPPED</html>', 'utf8');
+    const handler = createPacketDownloadHandler({ dataDir });
+    const res = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_dig_4');
+    expect(res.status).toBe(502);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.PACKET_INTEGRITY_FAILED);
+    expect(res.text()).not.toContain('SWAPPED');
+    const ledger = readFileSync(join(dataDir, 'ledger.jsonl'), 'utf8');
+    expect(ledger).toContain('packet_integrity_failed');
+    expect(ledger).toContain('pi_sim_dig_4');
   });
 });
