@@ -18,6 +18,8 @@ import {
   confirmTestPayment,
   isValidTestReceipt,
   sanitizeCardDigits,
+  isValidTestExpiry,
+  isValidTestCvc,
 } from './stripe-test.js';
 
 describe('test-mode lock', () => {
@@ -133,5 +135,38 @@ describe('sanitizeCardDigits', () => {
     expect(sanitizeCardDigits('42424242424242429999')).toBe('4242 4242 4242 4242');
     expect(sanitizeCardDigits('')).toBe('');
     expect(sanitizeCardDigits(null)).toBe('');
+  });
+});
+
+describe('isValidTestExpiry', () => {
+  it('accepts the documented test-card expiry and far-future dates', () => {
+    expect(isValidTestExpiry('12/34')).toBe(true);
+    expect(isValidTestExpiry('12/99')).toBe(true);
+  });
+
+  it('rejects malformed, out-of-range, or past expiries', () => {
+    expect(isValidTestExpiry('13/34')).toBe(false); // month > 12
+    expect(isValidTestExpiry('00/34')).toBe(false); // month 00
+    expect(isValidTestExpiry('12/20')).toBe(false); // past
+    expect(isValidTestExpiry('1/34')).toBe(false); // not MM/YY
+    expect(isValidTestExpiry('12-34')).toBe(false); // wrong separator
+    expect(isValidTestExpiry('abcd')).toBe(false);
+    expect(isValidTestExpiry('')).toBe(false);
+    expect(isValidTestExpiry(null)).toBe(false);
+  });
+});
+
+describe('isValidTestCvc', () => {
+  it('accepts 3-4 digit CVCs', () => {
+    expect(isValidTestCvc('123')).toBe(true);
+    expect(isValidTestCvc('1234')).toBe(true);
+  });
+
+  it('rejects anything that is not 3-4 digits', () => {
+    expect(isValidTestCvc('12')).toBe(false);
+    expect(isValidTestCvc('12345')).toBe(false);
+    expect(isValidTestCvc('12a')).toBe(false);
+    expect(isValidTestCvc('')).toBe(false);
+    expect(isValidTestCvc(null)).toBe(false);
   });
 });

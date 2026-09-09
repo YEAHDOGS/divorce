@@ -179,3 +179,33 @@ export function sanitizeCardDigits(value) {
   for (let i = 0; i < digits.length; i += 4) groups.push(digits.slice(i, i + 4));
   return groups.join(' ');
 }
+
+/* ── Card-field validation ─────────────────────────────────────────── */
+
+/**
+ * Validate an MM/YY expiry: two-digit month 01-12, two-digit year, and not
+ * expired. Pure check used by the checkout modal so malformed or past-dated
+ * input is rejected before any payment attempt is made.
+ * @param {string} value raw input value
+ * @returns {boolean}
+ */
+export function isValidTestExpiry(value) {
+  const m = /^(\d{2})\/(\d{2})$/.exec(String(value || '').trim());
+  if (!m) return false;
+  const month = Number(m[1]);
+  if (month < 1 || month > 12) return false;
+  const year = 2000 + Number(m[2]);
+  const now = new Date();
+  const nowYear = now.getFullYear();
+  const nowMonth = now.getMonth() + 1;
+  return year > nowYear || (year === nowYear && month >= nowMonth);
+}
+
+/**
+ * Validate a CVC: 3-4 digits, nothing else.
+ * @param {string} value raw input value
+ * @returns {boolean}
+ */
+export function isValidTestCvc(value) {
+  return /^\d{3,4}$/.test(String(value || '').trim());
+}
