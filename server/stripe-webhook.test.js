@@ -47,6 +47,7 @@ import {
   DOWNLOAD_TOKEN_TTL_SEC,
 } from './stripe-webhook.mjs';
 import { buildPacket } from '../src/lib/packet.js';
+import { MAX_BODY_BYTES } from './request-limits.mjs';
 
 const FIXTURE_SECRET = 'whsec_test_fixture_only';
 const WRONG_SECRET = 'whsec_test_wrong';
@@ -1089,5 +1090,45 @@ describe('packet integrity digests', () => {
     const ledger = readFileSync(join(dataDir, 'ledger.jsonl'), 'utf8');
     expect(ledger).toContain('packet_integrity_failed');
     expect(ledger).toContain('pi_sim_dig_4');
+  });
+});
+
+describe('request body limits — 256 KiB cap on every POST endpoint', () => {
+  it('rejects an oversized webhook body with 413 before signature verification', async () => {
+    // Unsigned AND oversized: if the cap fired after signature verification,
+    // this would be a 400 SIGNATURE_INVALID instead.
+    const handler = createWebhookHandler({ getWebhookSecret: () => FIXTURE_SECRET, dataDir });
+    const res = fakeRes();
+    await handler(fakeReq({ body: 'x'.repeat(MAX_BODY_BYTES + 1) }), res);
+    expect(res.status).toBe(413);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.BODY_TOO_LARGE);
+  });
+
+  it('lets a body exactly at the cap through to signature verification', async () => {
+    const handler = createWebhookHandler({ getWebhookSecret: () => FIXTURE_SECRET, dataDir });
+    const res = fakeRes();
+    await handler(fakeReq({ body: 'x'.repeat(MAX_BODY_BYTES) }), res);
+    // Cap passed; now fails on the missing signature — not the size.
+    expect(res.status).toBe(400);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.SIGNATURE_INVALID);
+  });
+
+  it('rejects an oversized checkout-session intake body with 413', async () => {
+    const handler = createCheckoutSessionHandler({ dataDir });
+    const res = fakeRes();
+    await handler(fakeReq({ body: 'y'.repeat(MAX_BODY_BYTES + 1) }), res);
+    expect(res.status).toBe(413);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.BODY_TOO_LARGE);
+  });
+
+  it('rejects an oversized packet-token body with 413', async () => {
+    const handler = createPacketDownloadTokenHandler({
+      getDownloadSecret: () => FIXTURE_SECRET,
+      dataDir,
+    });
+    const res = fakeRes();
+    await handler(fakeReq({ body: 'z'.repeat(MAX_BODY_BYTES + 1) }), res);
+    expect(res.status).toBe(413);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.BODY_TOO_LARGE);
   });
 });
