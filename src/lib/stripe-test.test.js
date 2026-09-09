@@ -17,6 +17,7 @@ import {
   createTestPaymentIntent,
   confirmTestPayment,
   isValidTestReceipt,
+  sanitizeCardDigits,
 } from './stripe-test.js';
 
 describe('test-mode lock', () => {
@@ -109,5 +110,28 @@ describe('isValidTestReceipt', () => {
     expect(isValidTestReceipt({ ...receipt, amount: 9999 })).toBe(false);
     expect(isValidTestReceipt({ ...receipt, id: 'rcpt_live_1' })).toBe(false);
     expect(isValidTestReceipt(null)).toBe(false);
+  });
+
+  it('rejects receipts for a different product, currency, or intent', () => {
+    const intent = createTestPaymentIntent();
+    const receipt = confirmTestPayment(intent.id);
+    // Forged receipt for another product can never unlock the packet.
+    expect(isValidTestReceipt({ ...receipt, productId: 'wax_subscription' })).toBe(false);
+    expect(isValidTestReceipt({ ...receipt, productId: undefined })).toBe(false);
+    expect(isValidTestReceipt({ ...receipt, currency: 'eur' })).toBe(false);
+    expect(isValidTestReceipt({ ...receipt, paymentIntentId: 'pi_3FakeLiveId' })).toBe(false);
+    expect(isValidTestReceipt({ ...receipt, paymentIntentId: undefined })).toBe(false);
+    // The genuine fixture receipt still validates.
+    expect(isValidTestReceipt(receipt)).toBe(true);
+  });
+});
+
+describe('sanitizeCardDigits', () => {
+  it('keeps digits only, grouped in fours, capped at 16', () => {
+    expect(sanitizeCardDigits('4242 4242 4242 4242')).toBe('4242 4242 4242 4242');
+    expect(sanitizeCardDigits('42ab!42-42cd42')).toBe('4242 4242');
+    expect(sanitizeCardDigits('42424242424242429999')).toBe('4242 4242 4242 4242');
+    expect(sanitizeCardDigits('')).toBe('');
+    expect(sanitizeCardDigits(null)).toBe('');
   });
 });
