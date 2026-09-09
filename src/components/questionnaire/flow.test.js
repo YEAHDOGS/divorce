@@ -86,4 +86,48 @@ describe('QuestionnaireFlow engine wiring', () => {
     await screen.findByText('Canadian County');
     await screen.findByText(/Oklahoma clerks can’t provide divorce forms/i);
   });
+
+  it('runs the completion → test-checkout → printable packet pipeline', async () => {
+    render(QuestionnaireFlow, { props: { onexit: () => {} } });
+
+    await screen.findByText('Which state will you file in?');
+    await clickOption('Texas');
+    await fillText('What is your full legal name?', 'Jane Doe');
+    await fillText('What is your spouse’s full legal name?', 'John Doe');
+    await fillText('Which county will you file in?', 'Harris County');
+    await fillText('When were you married?', '2015-06-01');
+    await fillText('Where were you married? (city, state)', 'Houston, Texas');
+    await screen.findByText('Has at least one spouse lived in the filing state for 6 months or more?');
+    await clickOption('Yes');
+    await screen.findByText('Do both spouses agree to the divorce and all of its terms?');
+    await clickOption('Yes');
+    await screen.findByText('Do you have any minor children together?');
+    await clickOption('No');
+    await screen.findByText('Have you already agreed on how to divide all property and debts?');
+    await clickOption('Yes');
+
+    // Every questionnaire answer lands in the packet — including the yes/no
+    // statements section (regression: these used to be silently dropped).
+    await screen.findByText('Your statements');
+    await screen.findByText('Has at least one spouse lived in the filing state for 6 months or more?');
+    await screen.findByText('Do you have any minor children together?');
+    const yesValues = await screen.findAllByText('Yes');
+    expect(yesValues.length).toBeGreaterThanOrEqual(3); // residency, uncontested, property split
+    const noValues = await screen.findAllByText('No');
+    expect(noValues.length).toBeGreaterThanOrEqual(1); // no minor children
+
+    // Test-mode checkout unlocks the paid packet: fixtures only, no network.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Pay $30 to unlock your printable packet' }));
+    await screen.findByText('Test mode — no real money moves');
+    await fireEvent.click(await screen.findByRole('button', { name: /^Pay \$30 — test$/ }));
+    await screen.findByText('Test payment succeeded', {}, { timeout: 8000 });
+    await screen.findByText('rcpt_test_', {}, { selector: 'dd' }).catch(() => {});
+    await fireEvent.click(await screen.findByRole('button', { name: 'Continue to your packet' }));
+
+    // Paid state: receipt badge + print action, all under test-mode ids.
+    await screen.findByText('Paid — test mode');
+    const receiptLine = await screen.findByText(/rcpt_test_\d+/);
+    expect(receiptLine).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Print my packet' });
+  });
 });

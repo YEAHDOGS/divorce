@@ -112,6 +112,19 @@
         { label: tr("q.state.question"), value: org.stateName },
       ],
     };
+    // Every yes/no answer becomes a printed statement — nothing the user
+    // told us is dropped from the packet.
+    const yn = (value) => tr(value ? "q.yes" : "q.no");
+    const attestations = {
+      id: "attestations",
+      title: tr("q.organizer.attestations_title"),
+      rows: [
+        { label: tr("q.residency.question"), value: yn(org.attestations.residency) },
+        { label: tr("q.uncontested.question"), value: yn(org.attestations.uncontested) },
+        { label: tr("q.minorChildren.question"), value: yn(!org.attestations.noMinorChildren) },
+        { label: tr("q.propertySplit.question"), value: yn(org.attestations.propertySplit) },
+      ],
+    };
     const checklist = {
       id: "checklist",
       title: tr("q.organizer.checklist_title"),
@@ -120,7 +133,7 @@
         value: tr(item.detailKey),
       })),
     };
-    return [parties, checklist];
+    return [parties, attestations, checklist];
   }
 </script>
 
