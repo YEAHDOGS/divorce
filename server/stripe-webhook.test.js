@@ -796,6 +796,141 @@ describe('GET /api/packet/:paymentIntentId — privacy headers', () => {
   });
 });
 
+/* ── Download tokens: expiry replay, tamper, header delivery ───────
+ * The token is the only key to the paid packet. These tests pin the
+ * adversarial paths: an expired token replayed after its 24h life,
+ * a token whose payload was rewritten without the signing secret,
+ * and token delivery via the x-download-token header (no query-string
+ * leak into logs/referrers). */
+
+describe('GET /api/packet — expiry replay and tamper', () => {
+  const dlHandler = () => createPacketDownloadHandler({ dataDir, getDownloadSecret: () => FIXTURE_SECRET });
+
+  it('403s when an expired token is replayed — twice, same outcome', async () => {
+    savePacketHtml(dataDir, 'pi_sim_exp_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    // Minted already-expired: what a token looks like replayed after its
+    // 24h life. The replay must fail closed as EXPIRED, not INVALID —
+    // the payer's recovery path is "mint a fresh token", so the code
+    // the client sees has to mean what it says.
+    const { token } = mintDownloadToken(dataDir, {
+      secret: FIXTURE_SECRET,
+      paymentIntentId: 'pi_sim_exp_1',
+      ttlSec: -3600,
+    });
+    const first = fakeRes();
+    await dlHandler()(fakeReq({ method: 'GET' }), first, 'pi_sim_exp_1', token);
+    expect(first.status).toBe(403);
+    expect(first.json().error.code).toBe(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_EXPIRED);
+    // Replay of the same expired token: the record was pruned, but the
+    // signature/expiry gate fires first — the outcome never changes.
+    const second = fakeRes();
+    await dlHandler()(fakeReq({ method: 'GET' }), second, 'pi_sim_exp_1', token);
+    expect(second.status).toBe(403);
+    expect(second.json().error.code).toBe(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_EXPIRED);
+  });
+
+  it('401s when the token payload is tampered with — at either payment intent', async () => {
+    savePacketHtml(dataDir, 'pi_sim_tamp_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    savePacketHtml(dataDir, 'pi_sim_tamp_2', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    const { token } = mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_sim_tamp_1' });
+    // Rewrite the payload's payment intent id without re-signing. Without
+    // the server secret the HMAC cannot be recomputed — the token must die.
+    const [b64, sig] = token.split('.');
+    const tampered = Buffer.from(b64, 'base64url').toString('utf8').replace('pi_sim_tamp_1', 'pi_sim_tamp_2');
+    const forged = `${Buffer.from(tampered, 'utf8').toString('base64url')}.${sig}`;
+    for (const intentId of ['pi_sim_tamp_2', 'pi_sim_tamp_1']) {
+      const res = fakeRes();
+      await dlHandler()(fakeReq({ method: 'GET' }), res, intentId, forged);
+      expect(res.status).toBe(401);
+      expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID);
+    }
+    // The attack did not burn the victim's real token.
+    const legit = fakeRes();
+    await dlHandler()(fakeReq({ method: 'GET' }), legit, 'pi_sim_tamp_1', token);
+    expect(legit.status).toBe(200);
+  });
+});
+
+/* ── Router-level integration: token via header, expiry, re-mint ─── */
+
+describe('startCheckoutServer packet download (integration)', () => {
+  let server;
+  let base;
+
+  beforeEach(async () => {
+    server = startCheckoutServer({
+      port: 0,
+      dataDir,
+      env: { ...process.env, STRIPE_WEBHOOK_SECRET: FIXTURE_SECRET },
+    });
+    await new Promise((resolve) => server.on('listening', resolve));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  /** Paid receipt + packet on disk, exactly what the webhook would leave. */
+  const prepPaid = (paymentIntentId) => {
+    recordPaidReceipt(dataDir, {
+      id: `rcpt_${paymentIntentId}`,
+      paymentIntentId,
+      amount: 3000,
+      currency: 'usd',
+    });
+    savePacketHtml(dataDir, paymentIntentId, '<!DOCTYPE html><html><body>PACKET</body></html>');
+  };
+
+  const mint = async (paymentIntentId) => {
+    const res = await fetch(`${base}/api/packet-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paymentIntentId }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()).downloadToken;
+  };
+
+  it('serves the paid packet via the x-download-token header, then single-uses it', async () => {
+    prepPaid('pi_sim_int_1');
+    const downloadToken = await mint('pi_sim_int_1');
+    const dl = await fetch(`${base}/api/packet/pi_sim_int_1`, {
+      headers: { 'x-download-token': downloadToken },
+    });
+    expect(dl.status).toBe(200);
+    expect(dl.headers.get('content-type')).toContain('text/html');
+    expect(await dl.text()).toContain('PACKET');
+    const reuse = await fetch(`${base}/api/packet/pi_sim_int_1`, {
+      headers: { 'x-download-token': downloadToken },
+    });
+    expect(reuse.status).toBe(403);
+    expect((await reuse.json()).error.code).toBe('DOWNLOAD_TOKEN_USED');
+  });
+
+  it('replays an expired token to 403, then the payer re-mints free and downloads', async () => {
+    prepPaid('pi_sim_int_2');
+    // Already-expired token: the replay of a dead token.
+    const { token: expired } = mintDownloadToken(dataDir, {
+      secret: FIXTURE_SECRET,
+      paymentIntentId: 'pi_sim_int_2',
+      ttlSec: -1,
+    });
+    const replay = await fetch(`${base}/api/packet/pi_sim_int_2`, {
+      headers: { 'x-download-token': expired },
+    });
+    expect(replay.status).toBe(403);
+    expect((await replay.json()).error.code).toBe('DOWNLOAD_TOKEN_EXPIRED');
+    // Recovery: a paid customer re-mints free — the expiry is not a trap.
+    const fresh = await mint('pi_sim_int_2');
+    const dl = await fetch(`${base}/api/packet/pi_sim_int_2`, {
+      headers: { 'x-download-token': fresh },
+    });
+    expect(dl.status).toBe(200);
+    expect(await dl.text()).toContain('PACKET');
+  });
+});
+
 /* ── rate-limit.mjs unit tests ────────────────────────────────────── */
 
 describe('createRateLimiter', () => {
