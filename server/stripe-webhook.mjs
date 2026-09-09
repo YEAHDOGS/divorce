@@ -43,6 +43,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PRODUCT, ERROR_CODES, createPaymentIntentHandler, loadStripeClient } from './stripe-payment-server.mjs';
 import { buildPacket, packetToPrintableHtml } from '../src/lib/packet.js';
+import { createRateLimiter, DEFAULT_RATE_LIMIT, RATE_LIMIT_ERROR_CODE } from './rate-limit.mjs';
+
+/* Exported for tests and for pinning in docs: the staging server's limits. */
+export { DEFAULT_RATE_LIMIT, RATE_LIMIT_ERROR_CODE };
 
 /* ── Hoisted constants ───────────────────────────────────────────── */
 
@@ -67,6 +71,20 @@ export const WEBHOOK_ERROR_CODES = Object.freeze({
   EVENT_INVALID: 'EVENT_INVALID',
   SESSION_INVALID: 'SESSION_INVALID',
   PACKET_NOT_READY: 'PACKET_NOT_READY',
+  RATE_LIMITED: RATE_LIMIT_ERROR_CODE,
+});
+
+/**
+ * Privacy headers for the paid-packet download. The packet is a sensitive
+ * legal document: it must never sit in a proxy/browser cache (no-store),
+ * must never be sniffed as another MIME type (nosniff), and must not leak
+ * its URL to third parties (no-referrer). Exported so tests can pin them.
+ */
+export const PACKET_DOWNLOAD_HEADERS = Object.freeze({
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  Pragma: 'no-cache',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
 });
 
 /* ── Error class ─────────────────────────────────────────────────── */
@@ -547,9 +565,13 @@ export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR } = {})
       });
     }
     recordLedger(dataDir, { kind: 'packet_downloaded', paymentIntentId });
+    // paymentIntentId is allowlist-sanitized by loadPacketHtml before this
+    // point — SAFE_ID permits no quotes, CR, or LF, so the interpolated
+    // filename cannot inject response headers.
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Disposition': `attachment; filename="divorce-packet-${paymentIntentId}.html"`,
+      ...PACKET_DOWNLOAD_HEADERS,
     });
     res.end(html);
   };
@@ -564,6 +586,13 @@ export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR } = {})
  *   POST /api/stripe-webhook        (signature-verified fulfillment)
  *   GET  /api/packet/:paymentIntentId (paid packet download)
  *
+ * The mutation endpoints (/api/create-payment-intent, /api/checkout-session)
+ * are rate-limited per client IP (server/rate-limit.mjs): abuse there burns
+ * Stripe API calls or disk writes. The webhook endpoint is NOT rate-limited —
+ * Stripe retries deliveries with backoff, and a strict limiter could drop a
+ * retry carrying money. The packet download sends privacy headers (no-store,
+ * nosniff, no-referrer) because it is a sensitive legal document.
+ *
  * The original payment-only startServer in stripe-payment-server.mjs is
  * left untouched — this is the one the end-to-end drill uses.
  */
@@ -575,12 +604,38 @@ export function startCheckoutServer({ port = 8787, env = process.env, dataDir = 
   });
   const sessionHandler = createCheckoutSessionHandler({ dataDir });
   const downloadHandler = createPacketDownloadHandler({ dataDir });
+  const limiter = createRateLimiter();
+
+  /** Per-IP rate gate for the mutation endpoints (not the webhook — see above). */
+  const rateGated = (route, handler) => (req, res) => {
+    const verdict = limiter.check(req, route);
+    if (!verdict.allowed) {
+      recordLedger(dataDir, { kind: 'rate_limited', route, retryAfterSec: verdict.retryAfterSec });
+      res.writeHead(429, {
+        'Content-Type': 'application/json',
+        'Retry-After': String(verdict.retryAfterSec),
+      });
+      res.end(
+        JSON.stringify({
+          error: {
+            code: WEBHOOK_ERROR_CODES.RATE_LIMITED,
+            message: 'Too many requests — slow down and try again shortly.',
+          },
+        })
+      );
+      return;
+    }
+    return handler(req, res);
+  };
+
+  const gatedIntentHandler = rateGated('create-payment-intent', intentHandler);
+  const gatedSessionHandler = rateGated('checkout-session', sessionHandler);
 
   const server = createServer((req, res) => {
     const pathname = new URL(req.url, 'http://x').pathname;
-    if (pathname === '/api/create-payment-intent') return intentHandler(req, res);
+    if (pathname === '/api/create-payment-intent') return gatedIntentHandler(req, res);
     if (pathname === '/api/stripe-webhook') return webhookHandler(req, res);
-    if (pathname === '/api/checkout-session') return sessionHandler(req, res);
+    if (pathname === '/api/checkout-session') return gatedSessionHandler(req, res);
     const packetMatch = /^\/api\/packet\/([^/]+)$/.exec(pathname);
     if (packetMatch) return downloadHandler(req, res, decodeURIComponent(packetMatch[1]));
     res.writeHead(404, { 'Content-Type': 'application/json' });
