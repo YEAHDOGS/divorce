@@ -113,6 +113,16 @@
               {new Date(packet.payment.paidAt).toLocaleDateString()}
             </dd>
           </div>
+          <div
+            class="py-2 sm:py-2.5 grid grid-cols-1 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-0.5 sm:gap-4"
+          >
+            <dt class="text-[11px] sm:text-xs md:text-sm text-neutral-500 print:text-black/70">
+              {$t("packet.provider_label")}
+            </dt>
+            <dd class="text-xs sm:text-sm text-white print:text-black">
+              {packet.payment.provider}
+            </dd>
+          </div>
         </dl>
       </section>
 
