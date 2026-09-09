@@ -58,3 +58,33 @@ Expected: `200` with `paymentIntentId`, `clientSecret`, `amountCents: 3000`.
 - [ ] Paste `sk_test_...` into `.env` as above
 - [ ] Run the drill, confirm the $30 test payment in the dashboard
 - [ ] Say the word and the frontend "Pay $30" button gets wired to this endpoint
+
+## The $30 drill WITHOUT Stripe (no keys, no network, no card)
+
+The webhook fulfillment path can be exercised end-to-end on staging without
+any Stripe account at all — the CLI signs a provider-style webhook event
+with a local test secret and drives session → webhook → ledger → packet → download:
+
+```sh
+# one command: spawns the server, runs the flow, proves dedupe, saves the packet
+STRIPE_WEBHOOK_SECRET=whsec_test_local_drill_only \
+  node server/simulate-checkout.mjs --spawn --resend --out /tmp
+```
+
+What it proves:
+1. `POST /api/checkout-session` stores the questionnaire answers → `sessionId`
+2. `POST /api/stripe-webhook` verifies the HMAC-SHA256 signature, dedupes the
+   event id, records the $30 payment in `server/data/ledger.jsonl`
+3. The packet is generated through the pre-flight + printable-output gates
+4. `--resend` delivers the same event again → `deduped:true`, no double packet
+5. `GET /api/packet/<paymentIntentId>` downloads the printable packet HTML
+
+The secret is a local-drill placeholder — the server must run with the same
+`STRIPE_WEBHOOK_SECRET` value. `server/data/` is gitignored staging storage.
+
+Negative paths (all covered by `server/stripe-webhook.test.js`):
+- bad/missing/stale signature → 400, nothing processed
+- `payment_intent.payment_failed` → recorded as ignored, NO packet
+- wrong amount (not exactly 3000 usd) → rejected, NO packet, NO receipt
+- unknown session → rejected, NO packet
+- packet download before payment → 404 PACKET_NOT_READY
