@@ -24,6 +24,8 @@
     createTestPaymentIntent,
     confirmTestPayment,
     sanitizeCardDigits,
+    isValidTestExpiry,
+    isValidTestCvc,
   } from "../../lib/stripe-test.js";
 
   let { open = false, onsuccess = null, onclose = null } = $props();
@@ -58,10 +60,21 @@
 
   function handlePay() {
     // Never silently default to the test card: an empty/invalid field is
-    // a user error, not a payment attempt.
+    // a user error, not a payment attempt. Expiry and CVC are validated
+    // too — the modal collects them, so it must reject junk in them.
     const digits = String(cardNumber).replace(/\D/g, "");
     if (digits.length < 4) {
       errorMsg = tr("checkout.card_invalid");
+      phase = "error";
+      return;
+    }
+    if (!isValidTestExpiry(cardExp)) {
+      errorMsg = tr("checkout.exp_invalid");
+      phase = "error";
+      return;
+    }
+    if (!isValidTestCvc(cardCvc)) {
+      errorMsg = tr("checkout.cvc_invalid");
       phase = "error";
       return;
     }
