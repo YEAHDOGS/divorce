@@ -21,6 +21,8 @@
   import QuestionStep from "./QuestionStep.svelte";
   import EligibilityFail from "./EligibilityFail.svelte";
   import ReviewScreen from "./ReviewScreen.svelte";
+  import CheckoutModal from "../checkout/CheckoutModal.svelte";
+  import { isValidTestReceipt } from "../../lib/stripe-test.js";
 
   let { onexit = null } = $props();
 
@@ -37,6 +39,17 @@
   let reasons = $state(session.ineligibilityReasons);
   let inputValue = $state("");
   let errorKey = $state(null);
+
+  // TEST-MODE checkout state: receipt appears after the simulated $30
+  // payment succeeds; the printable organizer stays free to preview.
+  let receipt = $state(null);
+  let checkoutOpen = $state(false);
+
+  /** Accept the test receipt only if it passes the validity guard. */
+  function handleCheckoutSuccess(r) {
+    if (isValidTestReceipt(r)) receipt = r;
+    checkoutOpen = false;
+  }
 
   function sync() {
     step = session.currentStep;
@@ -129,6 +142,50 @@
       </p>
     </div>
     <ReviewScreen {sections} />
+
+    <!-- TEST-MODE $30 checkout: receipt unlocks the printable packet flow. -->
+    <div class="no-print max-w-2xl sm:max-w-3xl md:max-w-4xl mx-auto mt-6 sm:mt-8">
+      {#if receipt}
+        <div
+          class="rounded-2xl border border-emerald-400/25 bg-emerald-400/5 px-5 sm:px-6 py-4 sm:py-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+        >
+          <div class="min-w-0">
+            <p class="text-xs sm:text-sm font-bold uppercase tracking-widest text-emerald-300 mb-1">
+              {$t("checkout.paid_badge")}
+            </p>
+            <p class="text-[11px] sm:text-xs text-neutral-400 font-mono break-all">
+              {$t("checkout.receipt_label")}: {receipt.id} · {receipt.cardLast4}
+            </p>
+          </div>
+          <button
+            type="button"
+            onclick={() => window.print()}
+            class="shrink-0 px-7 py-3 rounded-full bg-[#ff3344] hover:bg-[#ff4757] text-white text-sm font-bold tracking-wide transition-colors duration-300 cursor-pointer"
+          >
+            {$t("checkout.print_packet")}
+          </button>
+        </div>
+      {:else}
+        <div class="rounded-2xl border border-amber-400/25 bg-amber-400/5 px-5 sm:px-6 py-5 sm:py-6 text-center">
+          <button
+            type="button"
+            onclick={() => (checkoutOpen = true)}
+            class="w-full sm:w-auto px-8 py-3.5 rounded-full bg-[#ff3344] hover:bg-[#ff4757] text-white text-sm sm:text-base font-bold tracking-wide transition-colors duration-300 cursor-pointer shadow-lg shadow-[#ff3344]/20"
+          >
+            {$t("checkout.unlock_cta")}
+          </button>
+          <p class="mt-2.5 text-[10px] sm:text-xs text-neutral-500">
+            {$t("checkout.unlock_note")}
+          </p>
+        </div>
+      {/if}
+    </div>
+    <CheckoutModal
+      open={checkoutOpen}
+      onsuccess={handleCheckoutSuccess}
+      onclose={() => (checkoutOpen = false)}
+    />
+
     <div class="no-print text-center mt-6 sm:mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
       <button
         type="button"
