@@ -29,6 +29,8 @@ export const PACKET_VERSION = 1;
  * PRINT_CSS — the print stylesheet baked into the downloaded standalone
  * packet HTML. Drill-ready on paper:
  *   - @page margins sized for a clerk's filing cabinet (letter, 3/4")
+ *   - "Page X of Y" footer on every printed page via the @page margin box
+ *   - a cover page (title block + table of contents) on its own page
  *   - sections and table rows never split across a page boundary
  *   - headings never strand at the bottom of a page (orphaned)
  *   - pure black-on-white, zero backgrounds — ink-friendly for a laser
@@ -36,11 +38,17 @@ export const PACKET_VERSION = 1;
  * Exported so regression tests can pin every rule.
  */
 export const PRINT_CSS = `
-  @page { size: letter; margin: 0.75in; }
+  @page {
+    size: letter; margin: 0.75in;
+    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 10px; color: #000; }
+  }
   body { font-family: Georgia, "Times New Roman", serif; color: #000; background: #fff; margin: 32px; line-height: 1.5; }
   h1 { font-size: 22px; border-bottom: 2px solid #000; padding-bottom: 8px; break-after: avoid; }
   h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 1px; margin: 24px 0 8px; break-after: avoid; }
   section { break-inside: avoid; }
+  .cover { break-after: page; }
+  .cover h1 { font-size: 30px; margin-top: 72px; }
+  .cover ol { font-size: 14px; }
   table { width: 100%; border-collapse: collapse; }
   tr { break-inside: avoid; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ccc; vertical-align: top; }
@@ -378,8 +386,24 @@ export function packetToPrintableHtml(packet, labels = {}) {
 </style>
 </head>
 <body>
-  <h1>${e(L.documentTitle)}</h1>
-  <p class="meta">${e(L.packetIdLabel)}: ${e(packet.packetId)} &nbsp;·&nbsp; ${e(L.generatedLabel)}: ${e(packet.generatedAt)}</p>
+  <section>
+    <div class="cover">
+      <h1>${e(L.documentTitle)}</h1>
+      <p class="meta">${e(L.packetIdLabel)}: ${e(packet.packetId)} &nbsp;·&nbsp; ${e(L.generatedLabel)}: ${e(packet.generatedAt)}</p>
+      <table>
+        <tr><th>${e(L.petitionerLabel)}</th><td>${e(packet.parties.petitioner)}</td></tr>
+        <tr><th>${e(L.respondentLabel)}</th><td>${e(packet.parties.respondent)}</td></tr>
+        <tr><th>${e(L.stateLabel)}</th><td>${e(packet.stateName)}</td></tr>
+        <tr><th>${e(L.countyLabel)}</th><td>${e(packet.filing.county)}</td></tr>
+      </table>
+      <h2>${e(L.coverContentsLabel)}</h2>
+      <ol>
+        ${[L.paymentTitle, L.partiesTitle, L.marriageTitle, L.filingTitle, L.attestationsTitle, L.checklistTitle, L.signaturesTitle]
+          .map((t) => `<li>${e(t)}</li>`)
+          .join('\n')}
+      </ol>
+    </div>
+  </section>
 
   ${section(L.paymentTitle, [
     [L.receiptLabel, packet.payment.receiptId],
@@ -465,6 +489,7 @@ export const DEFAULT_PACKET_LABELS = Object.freeze({
   uncontestedLabel: 'Fully uncontested',
   noMinorChildrenLabel: 'No minor children together',
   propertySplitLabel: 'Property/debt split agreed',
+  coverContentsLabel: 'Packet contents',
   checklistTitle: 'Filing checklist',
   signaturesTitle: 'Signatures',
   petitionerSignatureLabel: 'Petitioner signature',
