@@ -35,6 +35,7 @@ import {
   packetDigest,
   readPacketDigest,
   sanitizeId,
+  updateReceiptPacketId,
   fulfillSucceededPayment,
   parseEvent,
   createWebhookHandler,
@@ -1209,5 +1210,103 @@ describe('startCheckoutServer secret fail-fast (startup)', () => {
     });
     await new Promise((resolve) => server.on('listening', resolve));
     await new Promise((resolve) => server.close(resolve));
+  });
+});
+
+/* ── Payment-record idempotency: the intent id is the idempotency key ─ */
+
+describe('payment_intent.succeeded — intent-level idempotency', () => {
+  /** Decode the intent object out of a succeededEvent body. */
+  function intentOf(rawBody) {
+    return JSON.parse(rawBody).data.object;
+  }
+
+  it('records the same payment intent twice via fulfill → one receipt, one packet, deduped:true', () => {
+    const session = saveSession(dataDir, { answers: FIXTURE_ANSWERS });
+    const intent = intentOf(succeededEvent({ eventId: 'evt_idem_1', intentId: 'pi_idem_1', sessionId: session.sessionId }));
+
+    const first = fulfillSucceededPayment(dataDir, { id: 'evt_idem_1', type: 'payment_intent.succeeded' }, intent);
+    expect(first.deduped).toBeUndefined();
+
+    const second = fulfillSucceededPayment(dataDir, { id: 'evt_idem_2', type: 'payment_intent.succeeded' }, intent);
+    expect(second.deduped).toBe(true);
+    expect(second.receiptId).toBe(first.receiptId);
+    expect(second.packetId).toBe(first.packetId);
+
+    const receipts = JSON.parse(readFileSync(join(dataDir, 'paid-receipts.json'), 'utf8'));
+    expect(Object.keys(receipts)).toHaveLength(1);
+    const ledger = readFileSync(join(dataDir, 'ledger.jsonl'), 'utf8');
+    expect(ledger.match(/"kind":"payment_recorded"/g)).toHaveLength(1);
+    expect(ledger.match(/"kind":"packet_ready"/g)).toHaveLength(1);
+  });
+
+  it('duplicate deliveries with DIFFERENT event ids return the original fulfillment, no double payment', async () => {
+    const session = saveSession(dataDir, { answers: FIXTURE_ANSWERS });
+    const body1 = succeededEvent({ eventId: 'evt_dup_a', intentId: 'pi_dup_1', sessionId: session.sessionId });
+    const body2 = succeededEvent({ eventId: 'evt_dup_b', intentId: 'pi_dup_1', sessionId: session.sessionId });
+
+    const res1 = fakeRes();
+    await webhookHandler()(signedReq(body1), res1);
+    expect(res1.status).toBe(200);
+    const first = res1.json();
+    expect(first.packetId).toBeDefined();
+
+    const res2 = fakeRes();
+    await webhookHandler()(signedReq(body2), res2);
+    expect(res2.status).toBe(200);
+    const second = res2.json();
+    expect(second.deduped).toBe(true);
+    expect(second.receiptId).toBe(first.receiptId);
+    expect(second.packetId).toBe(first.packetId);
+
+    // Money side: exactly one payment recorded, one packet generated.
+    const ledger = readFileSync(join(dataDir, 'ledger.jsonl'), 'utf8');
+    expect(ledger.match(/"kind":"payment_recorded"/g)).toHaveLength(1);
+    expect(ledger.match(/"kind":"packet_ready"/g)).toHaveLength(1);
+    expect(ledger).toContain('"kind":"payment_duplicate_ignored"');
+  });
+
+  it('resumes after a crash between payment record and packet generation (receipt without packetId)', () => {
+    const session = saveSession(dataDir, { answers: FIXTURE_ANSWERS });
+    // Simulate the crash window: money recorded, packet never generated.
+    recordPaidReceipt(dataDir, {
+      id: 'rcpt_crash_1',
+      eventId: 'evt_crash_1',
+      paymentIntentId: 'pi_crash_1',
+      amount: 3000,
+      currency: 'usd',
+      cardLast4: '4242',
+      paidAt: new Date().toISOString(),
+      testMode: true,
+    });
+
+    const intent = intentOf(succeededEvent({ eventId: 'evt_crash_2', intentId: 'pi_crash_1', sessionId: session.sessionId }));
+    const resumed = fulfillSucceededPayment(dataDir, { id: 'evt_crash_2', type: 'payment_intent.succeeded' }, intent);
+
+    expect(resumed.deduped).toBe(true);
+    expect(resumed.receiptId).toBe('rcpt_crash_1');
+    expect(resumed.packetId).toMatch(/^pkt_rcpt_/);
+    // The packet now exists and the receipt is linked — a third delivery
+    // returns the completed fulfillment without regenerating.
+    expect(loadPacketHtml(dataDir, 'pi_crash_1')).toContain('Alex Rivera');
+    const again = fulfillSucceededPayment(dataDir, { id: 'evt_crash_3', type: 'payment_intent.succeeded' }, intent);
+    expect(again.packetId).toBe(resumed.packetId);
+    const ledger = readFileSync(join(dataDir, 'ledger.jsonl'), 'utf8');
+    expect(ledger.match(/"kind":"payment_recorded"/g)).toHaveLength(1);
+    expect(ledger.match(/"kind":"packet_ready"/g)).toHaveLength(1);
+  });
+
+  it('updateReceiptPacketId links the packet and returns false for unknown receipts', () => {
+    const session = saveSession(dataDir, { answers: FIXTURE_ANSWERS });
+    const intent = intentOf(succeededEvent({ eventId: 'evt_link_1', intentId: 'pi_link_1', sessionId: session.sessionId }));
+    const { receiptId, packetId } = fulfillSucceededPayment(
+      dataDir,
+      { id: 'evt_link_1', type: 'payment_intent.succeeded' },
+      intent
+    );
+    const stored = findPaidReceiptByIntent(dataDir, 'pi_link_1');
+    expect(stored.id).toBe(receiptId);
+    expect(stored.packetId).toBe(packetId);
+    expect(updateReceiptPacketId(dataDir, 'rcpt_nope', 'pkt_nope')).toBe(false);
   });
 });

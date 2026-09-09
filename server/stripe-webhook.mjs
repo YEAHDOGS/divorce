@@ -382,6 +382,23 @@ export function isPaidReceipt(dataDir, receipt) {
   return !!receipt && typeof receipt.id === 'string' && !!receipts[receipt.id];
 }
 
+/**
+ * Link a generated packet back to its payment receipt. The receipt is the
+ * money truth; the packetId field makes fulfillments resumable and
+ * idempotent — a second sighting of the same payment intent returns the
+ * ORIGINAL fulfillment instead of recording a second payment.
+ */
+export function updateReceiptPacketId(dataDir, receiptId, packetId) {
+  const p = ensureDataDir(dataDir);
+  const receipts = readJsonFile(p.receiptsFile, {});
+  const receipt = receipts[receiptId];
+  if (!receipt) return false;
+  receipt.packetId = packetId;
+  writeFileSync(p.receiptsFile, JSON.stringify(receipts, null, 2), 'utf8');
+  recordLedger(dataDir, { kind: 'packet_linked', receiptId, packetId });
+  return true;
+}
+
 /** The provider shape buildPacket expects; isValidReceipt ONLY trusts the ledger. */
 export function webhookProvider(dataDir) {
   return {
@@ -646,7 +663,16 @@ function extractLast4(intent) {
 
 /**
  * Handle one verified payment_intent.succeeded object.
- * @returns {{ packetId: string, receiptId: string }}
+ *
+ * Idempotent on the payment intent id: the handler-level event-id dedupe
+ * covers Stripe's normal retries, but a duplicate delivery can also arrive
+ * with a DIFFERENT event id, or after a crash between recordPaidReceipt
+ * and markEventProcessed. The payment intent id is the idempotency key on
+ * the money side — a second sighting of an already-recorded intent
+ * returns the ORIGINAL fulfillment (marked deduped) and never records a
+ * second payment or regenerates the packet.
+ *
+ * @returns {{ packetId: string, receiptId: string, deduped?: true }}
  * @throws {WebhookError} SESSION_INVALID / packet-gate errors on failure
  *   (caller records these as rejected outcomes — no packet, no receipt)
  */
@@ -661,6 +687,28 @@ export function fulfillSucceededPayment(dataDir, event, intent, { nowMs = () => 
   const session = loadSession(dataDir, sessionId);
   if (!session) {
     fail(WEBHOOK_ERROR_CODES.SESSION_INVALID, 'webhook: no checkout session for this payment — no packet.');
+  }
+
+  const prior = findPaidReceiptByIntent(dataDir, intent.id);
+  if (prior) {
+    if (prior.packetId) {
+      // Fully fulfilled before: return the original, change nothing.
+      recordLedger(dataDir, {
+        kind: 'payment_duplicate_ignored',
+        receiptId: prior.id,
+        paymentIntentId: intent.id,
+        eventId: event.id,
+      });
+      return { packetId: prior.packetId, receiptId: prior.id, deduped: true };
+    }
+    // Receipt exists but the packet was never finished — a crash between
+    // recordPaidReceipt and savePacketHtml. Resume from the receipt: the
+    // money was already recorded, so only generation is missing.
+    const packet = buildPacket(webhookProvider(dataDir), prior, session.answers);
+    const html = packetToPrintableHtml(packet);
+    savePacketHtml(dataDir, intent.id, html);
+    updateReceiptPacketId(dataDir, prior.id, packet.packetId);
+    return { packetId: packet.packetId, receiptId: prior.id, deduped: true };
   }
 
   // 1) Record the payment FIRST — the receipt is valid only from this moment.
@@ -682,6 +730,7 @@ export function fulfillSucceededPayment(dataDir, event, intent, { nowMs = () => 
   const packet = buildPacket(webhookProvider(dataDir), receipt, session.answers);
   const html = packetToPrintableHtml(packet);
   savePacketHtml(dataDir, intent.id, html);
+  updateReceiptPacketId(dataDir, receipt.id, packet.packetId);
   return { packetId: packet.packetId, receiptId: receipt.id };
 }
 
@@ -749,9 +798,19 @@ export function createWebhookHandler({ getWebhookSecret, dataDir = DEFAULT_DATA_
 
       if (type === 'payment_intent.succeeded') {
         try {
-          const { packetId, receiptId } = fulfillSucceededPayment(dataDir, { id: eventId, type }, object, {
-            nowMs,
-          });
+          const { packetId, receiptId, deduped } = fulfillSucceededPayment(
+            dataDir,
+            { id: eventId, type },
+            object,
+            { nowMs }
+          );
+          if (deduped) {
+            // The same payment intent arrived under a DIFFERENT event id:
+            // the original fulfillment stands — nothing was re-recorded
+            // and the packet was not regenerated.
+            markEventProcessed(dataDir, eventId, 'deduped:intent');
+            return sendJson(res, 200, { received: true, eventId, deduped: true, packetId, receiptId });
+          }
           markEventProcessed(dataDir, eventId, 'fulfilled');
           return sendJson(res, 200, { received: true, eventId, packetId, receiptId });
         } catch (e) {
