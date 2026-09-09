@@ -9,7 +9,7 @@
    *   showContinue     (boolean) — show the continue button
    *   continueDisabled (boolean) — disable continue until the step is answered
    *
-   * Slots: header (e.g. ProgressBar), default (the QuestionStep), footer (extra).
+   * Snippets: header (e.g. ProgressBar), children (the QuestionStep), footer (extra).
    *
    * WIRING (coordinator): connect onback/oncontinue to the engine's
    * navigation. This shell never advances on its own.
@@ -22,16 +22,21 @@
     showBack = true,
     showContinue = true,
     continueDisabled = false,
+    header = null,
+    children = null,
+    footer = null,
   } = $props();
 </script>
 
 <div class="w-full max-w-xl sm:max-w-2xl md:max-w-2xl lg:max-w-3xl xl:max-w-3xl mx-auto">
-  <div class="no-print mb-4 sm:mb-6">
-    <slot name="header" />
-  </div>
+  {#if header}
+    <div class="no-print mb-4 sm:mb-6">
+      {@render header()}
+    </div>
+  {/if}
 
   <div class="bg-[#0e0e12]/70 border border-white/5 rounded-2xl p-4 sm:p-6 md:p-8 shadow-2xl">
-    <slot />
+    {#if children}{@render children()}{/if}
   </div>
 
   <div class="no-print mt-4 sm:mt-6 flex items-center justify-between gap-3">
@@ -59,7 +64,9 @@
     {/if}
   </div>
 
-  <div class="no-print mt-2">
-    <slot name="footer" />
-  </div>
+  {#if footer}
+    <div class="no-print mt-2">
+      {@render footer()}
+    </div>
+  {/if}
 </div>
