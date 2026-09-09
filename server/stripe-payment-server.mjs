@@ -19,6 +19,15 @@ import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { readRequestBody, BodyTooLargeError, MAX_BODY_BYTES } from './request-limits.mjs';
 
+/**
+ * Bare specifier for the real Stripe SDK, kept in a named constant so the
+ * import stays a runtime-only dynamic import: bundlers and test
+ * transforms must NOT statically resolve it (the package is installed
+ * only on the machine that actually runs the staging server, per
+ * docs/STRIPE-STAGING-CHECKLIST.md — never on this build machine).
+ */
+const STRIPE_MODULE_SPECIFIER = 'stripe';
+
 /** The one and only product: the uncontested divorce packet, fixed price. */
 export const PRODUCT = Object.freeze({
   id: 'uncontested_packet',
@@ -60,12 +69,12 @@ export async function loadStripeClient(env = process.env) {
     }
     const key = env.STRIPE_LIVE_SECRET_KEY;
     if (!key) throw err(ERROR_CODES.TEST_MODE_VIOLATION, 'stripe: STRIPE_LIVE_SECRET_KEY is not set.');
-    const { default: Stripe } = await import('stripe');
+    const { default: Stripe } = await import(STRIPE_MODULE_SPECIFIER);
     return Stripe(key);
   }
   const key = env.STRIPE_TEST_SECRET_KEY;
   if (!key) throw err(ERROR_CODES.INVALID_BODY, 'stripe: STRIPE_TEST_SECRET_KEY is not set.');
-  const { default: Stripe } = await import('stripe');
+  const { default: Stripe } = await import(STRIPE_MODULE_SPECIFIER);
   return Stripe(key);
 }
 
