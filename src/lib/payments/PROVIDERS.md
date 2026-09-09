@@ -43,10 +43,17 @@ ids only, never a full card number. Each provider also exports an
    them against a **server-side endpoint** that holds the Stripe secret
    key — the secret must never live in this SPA. Flip `testMode` to false
    in the scaffold once that implementation exists.
-2. Flip `ACTIVE_PROVIDER_NAME` to `'stripe'` in `src/lib/payments/index.js`.
-3. Run the full suite: `npx vitest run` — the contract tests in
+2. The server endpoint must verify incoming webhooks with
+   `verifyWebhookSignature` from `src/lib/payments/webhook.js` — a
+   hardened, tested HMAC-SHA256 implementation of Stripe's
+   `Stripe-Signature` scheme (constant-time comparison, timestamp
+   tolerance against replays). The SPA never holds the webhook secret.
+3. Flip `ACTIVE_PROVIDER_NAME` to `'stripe'` in `src/lib/payments/index.js`.
+4. Run the full suite: `npx vitest run` — the contract tests in
    `src/lib/payments/payments.test.js` assert every registered provider
-   conforms and behaves (the stripe scaffold has its own contract block).
+   conforms and behaves (the stripe scaffold has its own contract block),
+   and `webhook.test.js` covers signature verification end-to-end with
+   fixtures.
 
 ## Open questions for Brandon (blocking a live provider)
 
