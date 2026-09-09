@@ -39,6 +39,7 @@ export const ERROR_CODES = Object.freeze({
   DECLINED: 'DECLINED',
   UNKNOWN_RECEIPT: 'UNKNOWN_RECEIPT',
   WEBHOOKS_UNSUPPORTED: 'WEBHOOKS_UNSUPPORTED',
+  NOT_CONFIGURED: 'NOT_CONFIGURED',
 });
 
 /* ── Error class ─────────────────────────────────────────────────── */

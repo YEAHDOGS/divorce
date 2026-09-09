@@ -26,6 +26,7 @@ import {
   isValidTestCvc,
 } from './index.js';
 import { TEST_PROVIDER, isValidReceipt } from './test-provider.js';
+import { STRIPE_PROVIDER } from './stripe-provider.js';
 import { isValidTestReceipt } from '../stripe-test.js';
 
 const CHARGE = { productId: PRODUCT.id, cardLast4: '4242' };
@@ -73,8 +74,14 @@ describe('provider registry', () => {
   });
 
   it('rejects unknown provider names', () => {
-    expect(() => getProvider('stripe'))
+    expect(() => getProvider('square'))
       .toThrowError(expect.objectContaining({ code: ERROR_CODES.UNKNOWN_PROVIDER }));
+  });
+
+  it('resolves the registered stripe scaffold by name', () => {
+    const stripe = getProvider('stripe');
+    expect(stripe.name).toBe('stripe');
+    expect(stripe.displayName).toBe('StripeProvider');
   });
 });
 
@@ -132,6 +139,48 @@ describe('TestProvider.refund', () => {
 describe('TestProvider.verifyWebhook', () => {
   it('declares webhooks unsupported (no real verification surface)', () => {
     const v = TEST_PROVIDER.verifyWebhook({}, 'sig', 'secret');
+    expect(v.supported).toBe(false);
+    expect(v.valid).toBe(false);
+  });
+});
+
+/* ── StripeProvider scaffold ─────────────────────────────────────── */
+/* Registered and inert: no live account, no endpoint, no charge possible. */
+
+describe('StripeProvider scaffold', () => {
+  it('conforms to the adapter contract', () => {
+    expect(assertConformsToContract(STRIPE_PROVIDER)).toBe(true);
+  });
+
+  it('stays in test mode: no real money can move', () => {
+    expect(STRIPE_PROVIDER.testMode).toBe(true);
+    expect(STRIPE_PROVIDER.scaffold).toBe(true);
+  });
+
+  it('createPayment refuses every charge with NOT_CONFIGURED', async () => {
+    await expect(
+      STRIPE_PROVIDER.createPayment(PRODUCT.amountCents, PRODUCT.currency, CHARGE)
+    ).rejects.toThrowError(expect.objectContaining({ code: ERROR_CODES.NOT_CONFIGURED }));
+  });
+
+  it('still validates the charge args before refusing', async () => {
+    await expect(
+      STRIPE_PROVIDER.createPayment(5000, PRODUCT.currency, CHARGE)
+    ).rejects.toThrowError(expect.objectContaining({ code: ERROR_CODES.INVALID_AMOUNT }));
+  });
+
+  it('refund refuses with NOT_CONFIGURED (nothing live to refund)', async () => {
+    await expect(STRIPE_PROVIDER.refund('rcpt_test_000001'))
+      .rejects.toThrowError(expect.objectContaining({ code: ERROR_CODES.NOT_CONFIGURED }));
+  });
+
+  it('never validates a receipt — packet unlock stays locked', () => {
+    expect(STRIPE_PROVIDER.isValidReceipt(null)).toBe(false);
+    expect(STRIPE_PROVIDER.isValidReceipt({ id: 'rcpt_live_1' })).toBe(false);
+  });
+
+  it('declares webhooks unsupported (no endpoint to verify)', () => {
+    const v = STRIPE_PROVIDER.verifyWebhook({}, 'sig', 'secret');
     expect(v.supported).toBe(false);
     expect(v.valid).toBe(false);
   });

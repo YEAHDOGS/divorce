@@ -36,14 +36,17 @@ ids only, never a full card number. Each provider also exports an
 
 ## Adding Stripe (or any real provider) later
 
-1. Create `src/lib/payments/stripe-provider.js` implementing the three
-   functions. **The secret key must live on a server-side endpoint, never
-   in this SPA** — the browser calls your endpoint, which calls Stripe.
-2. Register it in the `REGISTRY` in `src/lib/payments/index.js`.
-3. Flip `ACTIVE_PROVIDER_NAME` to `'stripe'`.
-4. Run the full suite: `npx vitest run` — the contract tests in
+1. The StripeProvider **scaffold** already exists at
+   `src/lib/payments/stripe-provider.js` and is registered under `'stripe'`
+   in `payments/index.js`. It is deliberately inert: `createPayment` and
+   `refund` always throw `NOT_CONFIGURED`. Going live means implementing
+   them against a **server-side endpoint** that holds the Stripe secret
+   key — the secret must never live in this SPA. Flip `testMode` to false
+   in the scaffold once that implementation exists.
+2. Flip `ACTIVE_PROVIDER_NAME` to `'stripe'` in `src/lib/payments/index.js`.
+3. Run the full suite: `npx vitest run` — the contract tests in
    `src/lib/payments/payments.test.js` assert every registered provider
-   conforms and behaves.
+   conforms and behaves (the stripe scaffold has its own contract block).
 
 ## Open questions for Brandon (blocking a live provider)
 
