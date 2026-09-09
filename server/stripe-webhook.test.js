@@ -527,3 +527,151 @@ describe('parseEvent / processed events', () => {
     ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.SESSION_INVALID }));
   });
 });
+
+/* ── Packet download privacy headers ──────────────────────────────── */
+
+import {
+  PACKET_DOWNLOAD_HEADERS,
+  startCheckoutServer,
+} from './stripe-webhook.mjs';
+import {
+  createRateLimiter,
+  DEFAULT_RATE_LIMIT,
+  RATE_LIMIT_ERROR_CODE,
+  clientKey,
+} from './rate-limit.mjs';
+
+describe('GET /api/packet/:paymentIntentId — privacy headers', () => {
+  it('sends no-store / nosniff / no-referrer on the paid download', async () => {
+    savePacketHtml(dataDir, 'pi_sim_priv_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    const handler = createPacketDownloadHandler({ dataDir });
+    const res = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_priv_1');
+    expect(res.status).toBe(200);
+    expect(res.headers['Cache-Control']).toBe(PACKET_DOWNLOAD_HEADERS['Cache-Control']);
+    expect(res.headers['Cache-Control']).toContain('no-store');
+    expect(res.headers['X-Content-Type-Options']).toBe('nosniff');
+    expect(res.headers['Referrer-Policy']).toBe('no-referrer');
+    expect(res.headers['Pragma']).toBe('no-cache');
+  });
+
+  it('rejects a quote-injection id as an invalid id (never touches the header)', async () => {
+    const handler = createPacketDownloadHandler({ dataDir });
+    const res = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_x"\r\nX-Injected: 1');
+    expect(res.status).toBe(404);
+    expect(res.headers['Content-Disposition'] || '').not.toContain('X-Injected');
+  });
+});
+
+/* ── rate-limit.mjs unit tests ────────────────────────────────────── */
+
+describe('createRateLimiter', () => {
+  it('allows maxRequests hits, then denies with a retry hint', () => {
+    let now = 1_000_000;
+    const limiter = createRateLimiter({ maxRequests: 3, windowMs: 60_000, nowMs: () => now });
+    const req = { socket: { remoteAddress: '127.0.0.1' } };
+    expect(limiter.check(req, 'checkout-session')).toEqual({ allowed: true });
+    expect(limiter.check(req, 'checkout-session')).toEqual({ allowed: true });
+    expect(limiter.check(req, 'checkout-session')).toEqual({ allowed: true });
+    const denied = limiter.check(req, 'checkout-session');
+    expect(denied.allowed).toBe(false);
+    expect(denied.retryAfterSec).toBeGreaterThanOrEqual(1);
+    expect(denied.retryAfterSec).toBeLessThanOrEqual(60);
+  });
+
+  it('re-opens the window once old hits expire', () => {
+    let now = 1_000_000;
+    const limiter = createRateLimiter({ maxRequests: 1, windowMs: 10_000, nowMs: () => now });
+    const req = { socket: { remoteAddress: '::1' } };
+    expect(limiter.check(req, 'r').allowed).toBe(true);
+    expect(limiter.check(req, 'r').allowed).toBe(false);
+    now += 10_001; // window fully slides past the first hit
+    expect(limiter.check(req, 'r').allowed).toBe(true);
+  });
+
+  it('keeps separate buckets per route and per client', () => {
+    const limiter = createRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+    const a = { socket: { remoteAddress: '10.0.0.1' } };
+    const b = { socket: { remoteAddress: '10.0.0.2' } };
+    expect(limiter.check(a, 'checkout-session').allowed).toBe(true);
+    expect(limiter.check(a, 'checkout-session').allowed).toBe(false);
+    expect(limiter.check(a, 'create-payment-intent').allowed).toBe(true); // other route: open
+    expect(limiter.check(b, 'checkout-session').allowed).toBe(true); // other client: open
+    expect(limiter.size()).toBe(3);
+  });
+
+  it('validates constructor options', () => {
+    expect(() => createRateLimiter({ maxRequests: 0 })).toThrow(RangeError);
+    expect(() => createRateLimiter({ windowMs: -5 })).toThrow(RangeError);
+  });
+
+  it('clientKey falls back gracefully without a socket', () => {
+    expect(clientKey({})).toBe('unknown');
+    expect(clientKey(null)).toBe('unknown');
+    expect(clientKey({ socket: { remoteAddress: '::ffff:127.0.0.1' } })).toBe('::ffff:127.0.0.1');
+  });
+
+  it('ships sane staging defaults', () => {
+    expect(DEFAULT_RATE_LIMIT.maxRequests).toBe(20);
+    expect(DEFAULT_RATE_LIMIT.windowMs).toBe(10 * 60 * 1000);
+    expect(RATE_LIMIT_ERROR_CODE).toBe('RATE_LIMITED');
+  });
+});
+
+/* ── Router-level integration: real server, localhost only ───────── */
+
+describe('startCheckoutServer rate gating (integration)', () => {
+  let server;
+  let base;
+
+  beforeEach(async () => {
+    server = startCheckoutServer({ port: 0, dataDir });
+    await new Promise((resolve) => server.on('listening', resolve));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  it('429s /api/checkout-session after 20 hits from one IP', async () => {
+    const body = JSON.stringify({ email: 'drill@example.com', answers: FIXTURE_ANSWERS });
+    let lastStatus = null;
+    for (let i = 0; i < 21; i++) {
+      const res = await fetch(`${base}/api/checkout-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      lastStatus = res.status;
+      await res.text();
+    }
+    expect(lastStatus).toBe(429);
+  });
+
+  it('returns a Retry-After + RATE_LIMITED body on the 21st hit', async () => {
+    const body = JSON.stringify({ answers: {} });
+    for (let i = 0; i < 20; i++) {
+      await (await fetch(`${base}/api/checkout-session`, { method: 'POST', body })).text();
+    }
+    const res = await fetch(`${base}/api/checkout-session`, { method: 'POST', body });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).not.toBeNull();
+    const payload = await res.json();
+    expect(payload.error.code).toBe('RATE_LIMITED');
+  });
+
+  it('never rate-limits the webhook endpoint (Stripe retries must land)', async () => {
+    // 25 garbage deliveries: all fail signature verification (400), none 429.
+    for (let i = 0; i < 25; i++) {
+      const res = await fetch(`${base}/api/stripe-webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: `evt_burst_${i}`, type: 'payment_intent.succeeded' }),
+      });
+      expect(res.status).not.toBe(429);
+      await res.text();
+    }
+  });
+});
