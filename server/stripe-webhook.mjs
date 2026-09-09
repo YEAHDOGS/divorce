@@ -52,6 +52,11 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } fr
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PRODUCT, ERROR_CODES, createPaymentIntentHandler, loadStripeClient } from './stripe-payment-server.mjs';
+import {
+  createCheckoutSessionApiHandler,
+  makeRealCreateSession,
+  resolveTestSecretKey,
+} from './stripe-checkout-session.mjs';
 import { buildPacket, packetToPrintableHtml } from '../src/lib/packet.js';
 import { createRateLimiter, DEFAULT_RATE_LIMIT, RATE_LIMIT_ERROR_CODE } from './rate-limit.mjs';
 import { readRequestBody, BodyTooLargeError, MAX_BODY_BYTES } from './request-limits.mjs';
@@ -1012,6 +1017,12 @@ export function startCheckoutServer({ port = 8787, env = process.env, dataDir = 
     dataDir,
   });
   const sessionHandler = createCheckoutSessionHandler({ dataDir });
+  // Stripe Checkout Sessions (test-mode-only; log-only when no key is set).
+  // The real network call is the injected boundary — stubbed in unit tests.
+  const stripeSessionHandler = createCheckoutSessionApiHandler({
+    createSession: makeRealCreateSession(() => resolveTestSecretKey(env).key),
+    env,
+  });
   const downloadTokenHandler = createPacketDownloadTokenHandler({
     getDownloadSecret: () => loadDownloadSecret(env),
     dataDir,
@@ -1046,6 +1057,7 @@ export function startCheckoutServer({ port = 8787, env = process.env, dataDir = 
 
   const gatedIntentHandler = rateGated('create-payment-intent', intentHandler);
   const gatedSessionHandler = rateGated('checkout-session', sessionHandler);
+  const gatedStripeSessionHandler = rateGated('stripe-checkout-session', stripeSessionHandler);
   const gatedTokenHandler = rateGated('packet-token', downloadTokenHandler);
 
   const server = createServer((req, res) => {
@@ -1054,6 +1066,7 @@ export function startCheckoutServer({ port = 8787, env = process.env, dataDir = 
     if (pathname === '/api/create-payment-intent') return gatedIntentHandler(req, res);
     if (pathname === '/api/stripe-webhook') return webhookHandler(req, res);
     if (pathname === '/api/checkout-session') return gatedSessionHandler(req, res);
+    if (pathname === '/api/stripe-checkout-session') return gatedStripeSessionHandler(req, res);
     if (pathname === '/api/packet-token') return gatedTokenHandler(req, res);
     const packetMatch = /^\/api\/packet\/([^/]+)$/.exec(pathname);
     if (packetMatch) {
