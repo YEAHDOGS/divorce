@@ -75,6 +75,10 @@ export async function refund(receiptId) {
 
 /**
  * No webhook endpoint exists, so there is nothing to verify against.
+ * When the server-side payment endpoint is built, it should verify
+ * incoming signatures with `verifyWebhookSignature` from
+ * src/lib/payments/webhook.js (already implemented + tested) — see
+ * PROVIDERS.md "Adding Stripe (or any real provider) later".
  *
  * @returns {import('./provider.js').WebhookVerification}
  */
