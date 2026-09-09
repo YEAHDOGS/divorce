@@ -10,20 +10,24 @@
  *   const receipt = await provider.createPayment(amountCents, currency, metadata);
  *
  * To go live one day:
- *   1. Write src/lib/payments/stripe-provider.js (see PROVIDERS.md).
- *   2. Register it in the REGISTRY below.
- *   3. Flip ACTIVE_PROVIDER_NAME to 'stripe'.
+ *   1. StripeProvider scaffold exists (src/lib/payments/stripe-provider.js).
+ *      Implement its createPayment/refund against a server-side endpoint
+ *      that holds the Stripe SECRET key (never in this SPA).
+ *   2. Set its testMode to false in the scaffold.
+ *   3. Flip ACTIVE_PROVIDER_NAME to 'stripe' (registered below).
  * Nothing else in the app changes.
  */
 
 import { PaymentProviderError, ERROR_CODES } from './provider.js';
 import { TEST_PROVIDER } from './test-provider.js';
+import { STRIPE_PROVIDER } from './stripe-provider.js';
 
 /* ── Provider registry ───────────────────────────────────────────── */
 /* Keys are the `name` each provider module declares. */
 
 const REGISTRY = Object.freeze({
   [TEST_PROVIDER.name]: TEST_PROVIDER,
+  [STRIPE_PROVIDER.name]: STRIPE_PROVIDER,
 });
 
 /**
