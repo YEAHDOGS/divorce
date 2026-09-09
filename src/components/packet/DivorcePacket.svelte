@@ -29,9 +29,10 @@
     if (ondownload) ondownload();
   }
 
-  const pricePaid = packet
-    ? `$${(packet.payment.amountCents / 100).toFixed(2)} ${String(packet.payment.currency).toUpperCase()}`
-    : "";
+  /** Paid amount line — derived so it tracks the packet prop reactively. */
+  const pricePaid = $derived(
+    packet ? `$${(packet.payment.amountCents / 100).toFixed(2)} ${String(packet.payment.currency).toUpperCase()}` : ""
+  );
 </script>
 
 {#if packet}
