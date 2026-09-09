@@ -25,8 +25,9 @@ import { readRequestBody, BodyTooLargeError, MAX_BODY_BYTES } from './request-li
  * transforms must NOT statically resolve it (the package is installed
  * only on the machine that actually runs the staging server, per
  * docs/STRIPE-STAGING-CHECKLIST.md — never on this build machine).
+ * Exported so sibling server modules share the exact specifier.
  */
-const STRIPE_MODULE_SPECIFIER = 'stripe';
+export const STRIPE_MODULE_SPECIFIER = 'stripe';
 
 /** The one and only product: the uncontested divorce packet, fixed price. */
 export const PRODUCT = Object.freeze({
