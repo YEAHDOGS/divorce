@@ -13,4 +13,10 @@ export default defineConfig(({ command }) => ({
     tailwindcss(),
     svelte()
   ],
-}))
+  // Component tests need the DOM build of svelte, not the SSR entry.
+  // VITEST is only set when running under vitest, so the app build is untouched.
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : {},
+  test: {
+    environment: 'jsdom',
+  },
+})
