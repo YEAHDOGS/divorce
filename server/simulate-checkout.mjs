@@ -22,7 +22,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHmac } from 'node:crypto';
@@ -208,6 +208,7 @@ async function main() {
     if (!dlRes.ok) die(`packet download failed: ${dlRes.status} ${await dlRes.text()}`);
     const html = await dlRes.text();
     const outFile = join(args.outDir, `packet-${paymentIntentId}.html`);
+    mkdirSync(args.outDir, { recursive: true });
     writeFileSync(outFile, html, 'utf8');
     log(`    saved ${outFile} (${html.length} bytes)`);
     if (!html.includes('$30.00')) die('downloaded packet is missing the $30.00 price line');
