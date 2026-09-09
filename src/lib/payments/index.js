@@ -66,3 +66,9 @@ export {
   isValidTestExpiry,
   isValidTestCvc,
 } from './test-provider.js';
+
+/* ── Failure UX ──────────────────────────────────────────────────── */
+/* The checkout modal shows classifyPaymentFailure's copy instead of raw
+   error codes: honest charge-state claims + the right recovery step. */
+
+export { FAILURE_KINDS, failureKindOf, classifyPaymentFailure } from './failure-copy.js';
