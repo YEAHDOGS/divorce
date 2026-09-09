@@ -10,7 +10,10 @@
  * Routes (wired into startServer in stripe-payment-server.mjs):
  *   POST /api/checkout-session  — intake: { email?, answers } → { sessionId }
  *   POST /api/stripe-webhook    — provider event delivery (signature-verified)
- *   GET  /api/packet/:paymentIntentId — download the paid packet (404 until paid)
+ *   POST /api/packet-token      — mint a single-use download token for a paid
+ *                                  payment intent (requires a paid receipt)
+ *   GET  /api/packet/:paymentIntentId?token=… — download the paid packet
+ *            (401/403 without a valid token; 404 until paid)
  *
  * Security model:
  *  - TEST-MODE SAFE by default: the webhook secret is read from
@@ -28,6 +31,10 @@
  *    second lock, not just the router.
  *  - Failed payments, wrong amounts, and unknown sessions are recorded
  *    in the ledger but produce NO packet and NO receipt.
+ *  - Packet download requires a single-use, HMAC-signed, 24h-expiring
+ *    download token minted for the exact paid payment intent
+ *    (POST /api/packet-token). The payment intent id alone never unlocks
+ *    the packet — knowing the URL is not the same as having paid.
  *  - User values are escaped by packetToPrintableHtml; the download
  *    endpoint allowlists the payment-intent id (no path traversal).
  *
@@ -73,7 +80,15 @@ export const WEBHOOK_ERROR_CODES = Object.freeze({
   PACKET_NOT_READY: 'PACKET_NOT_READY',
   PACKET_INTEGRITY_FAILED: 'PACKET_INTEGRITY_FAILED',
   RATE_LIMITED: RATE_LIMIT_ERROR_CODE,
+  DOWNLOAD_TOKEN_INVALID: 'DOWNLOAD_TOKEN_INVALID',
+  DOWNLOAD_TOKEN_EXPIRED: 'DOWNLOAD_TOKEN_EXPIRED',
+  DOWNLOAD_TOKEN_USED: 'DOWNLOAD_TOKEN_USED',
+  DOWNLOAD_TOKEN_MISMATCH: 'DOWNLOAD_TOKEN_MISMATCH',
 });
+
+/** Download tokens live 24h. A paid customer re-mints free — a single-use
+ *  token is consumed by the download it authorizes. */
+export const DOWNLOAD_TOKEN_TTL_SEC = 24 * 60 * 60;
 
 /**
  * Privacy headers for the paid-packet download. The packet is a sensitive
@@ -126,6 +141,31 @@ export function loadWebhookSecret(env = process.env) {
     fail(
       WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING,
       'webhook: STRIPE_WEBHOOK_SECRET is not set — cannot verify signatures.'
+    );
+  }
+  return secret;
+}
+
+/**
+ * Resolve the download-token signing secret. DEFAULT-DENY on live mode,
+ * mirroring loadWebhookSecret. Prefers the dedicated DOWNLOAD_TOKEN_SECRET
+ * so the token signer can be rotated independently of the webhook key;
+ * falls back to STRIPE_WEBHOOK_SECRET so the staging drill needs only
+ * the one secret it already sets.
+ */
+export function loadDownloadSecret(env = process.env) {
+  const mode = String(env.STRIPE_MODE || 'test').toLowerCase();
+  if (mode !== 'test' && env.ALLOW_LIVE_PAYMENTS !== 'true') {
+    fail(
+      WEBHOOK_ERROR_CODES.TEST_MODE_VIOLATION,
+      'download tokens: live mode refused — set ALLOW_LIVE_PAYMENTS=true explicitly.'
+    );
+  }
+  const secret = env.DOWNLOAD_TOKEN_SECRET || env.STRIPE_WEBHOOK_SECRET;
+  if (typeof secret !== 'string' || secret.length === 0) {
+    fail(
+      WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING,
+      'download tokens: no secret set — set DOWNLOAD_TOKEN_SECRET or STRIPE_WEBHOOK_SECRET.'
     );
   }
   return secret;
@@ -223,6 +263,7 @@ function paths(dataDir) {
     packetsDir: join(dataDir, 'packets'),
     processedFile: join(dataDir, 'processed-events.json'),
     receiptsFile: join(dataDir, 'paid-receipts.json'),
+    tokensFile: join(dataDir, 'download-tokens.json'),
     ledgerFile: join(dataDir, 'ledger.jsonl'),
   };
 }
@@ -390,6 +431,174 @@ function timingSafeDigestEqual(actual, expected) {
   let diff = 0;
   for (let i = 0; i < actual.length; i++) diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
   return diff === 0;
+}
+
+/* ── Download tokens: the ONLY key to GET /api/packet ───────────────
+ *
+ * Knowing a payment intent id is not proof of payment — ids appear in
+ * receipts, emails, and URLs. So the packet download is gated on a
+ * single-use, HMAC-SHA256-signed, 24h-expiring token minted per payment
+ * intent (POST /api/packet-token, requires a recorded paid receipt).
+ *
+ * Token shape: <base64url(payload)>.<hexsig>
+ *   payload = "<paymentIntentId>.<expUnix>.<nonce>"
+ *   sig     = HMAC-SHA256(secret, payload)
+ * The server also keeps the nonce in download-tokens.json so a token
+ * can be consumed exactly once and revoked records can't be reused.
+ * Stale records are pruned on every verify (bounded growth).
+ */
+
+function base64urlEncode(text) {
+  return Buffer.from(text, 'utf8').toString('base64url');
+}
+
+function base64urlDecode(b64) {
+  return Buffer.from(b64, 'base64url').toString('utf8');
+}
+
+/**
+ * Mint a single-use download token for a PAID payment intent.
+ * Callers must verify a paid receipt exists first — minting is not a gate.
+ * @returns {{ token: string, expiresAt: string (ISO), nonce: string }}
+ * @throws {WebhookError} EVENT_INVALID when the payment intent id is unsafe
+ */
+export function mintDownloadToken(
+  dataDir,
+  { secret, paymentIntentId, ttlSec = DOWNLOAD_TOKEN_TTL_SEC, nowMs = Date.now } = {}
+) {
+  const safe = sanitizeId(paymentIntentId);
+  if (!safe) fail(WEBHOOK_ERROR_CODES.EVENT_INVALID, 'download token: unsafe payment intent id.');
+  if (typeof secret !== 'string' || secret.length === 0) {
+    fail(WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING, 'download token: no signing secret.');
+  }
+  const p = ensureDataDir(dataDir);
+  const exp = Math.floor(nowMs() / 1000) + ttlSec;
+  const nonce = randomUUID().replace(/-/g, '');
+  const payload = `${safe}.${exp}.${nonce}`;
+  const sig = createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+  const token = `${base64urlEncode(payload)}.${sig}`;
+  const tokens = readJsonFile(p.tokensFile, {});
+  tokens[nonce] = { paymentIntentId: safe, exp, used: false, mintedAt: new Date(nowMs()).toISOString() };
+  writeFileSync(p.tokensFile, JSON.stringify(tokens, null, 2), 'utf8');
+  recordLedger(dataDir, { kind: 'download_token_minted', paymentIntentId: safe, exp });
+  return { token, expiresAt: new Date(exp * 1000).toISOString(), nonce };
+}
+
+function parseDownloadToken(token) {
+  if (typeof token !== 'string' || token.length === 0) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID, 'download token: a token is required.');
+  }
+  const parts = token.split('.');
+  if (parts.length !== 2 || parts[0].length === 0 || !/^[0-9a-f]{64}$/.test(parts[1])) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID, 'download token: malformed token.');
+  }
+  let payload;
+  try {
+    payload = base64urlDecode(parts[0]);
+  } catch {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID, 'download token: malformed token.');
+  }
+  const fields = payload.split('.');
+  if (fields.length !== 3 || !sanitizeId(fields[0]) || !/^\d+$/.test(fields[1]) || !/^[0-9a-f]{32}$/.test(fields[2])) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID, 'download token: malformed token.');
+  }
+  return { payload, sig: parts[1], paymentIntentId: fields[0], exp: Number(fields[1]), nonce: fields[2] };
+}
+
+function timingSafeHexEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+}
+
+function pruneExpiredTokens(dataDir, nowSec) {
+  const p = ensureDataDir(dataDir);
+  const tokens = readJsonFile(p.tokensFile, {});
+  let dirty = false;
+  for (const [nonce, rec] of Object.entries(tokens)) {
+    if (rec && typeof rec.exp === 'number' && rec.exp <= nowSec) {
+      delete tokens[nonce];
+      dirty = true;
+    }
+  }
+  if (dirty) writeFileSync(p.tokensFile, JSON.stringify(tokens, null, 2), 'utf8');
+}
+
+/**
+ * Validate a download token WITHOUT consuming it. Fails closed:
+ * bad signature, expiry, prior use, or a token minted for a DIFFERENT
+ * payment intent all throw WebhookError.
+ * @returns {{ paymentIntentId: string, nonce: string, exp: number }}
+ */
+export function peekDownloadToken(
+  dataDir,
+  { secret, paymentIntentId, token, nowMs = Date.now } = {}
+) {
+  if (typeof secret !== 'string' || secret.length === 0) {
+    fail(WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING, 'download token: no signing secret.');
+  }
+  const { payload, sig, paymentIntentId: tokenPi, exp, nonce } = parseDownloadToken(token);
+  const expected = createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+  if (!timingSafeHexEqual(sig, expected)) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID, 'download token: bad signature.');
+  }
+  const nowSec = Math.floor(nowMs() / 1000);
+  pruneExpiredTokens(dataDir, nowSec);
+  if (exp <= nowSec) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_EXPIRED, 'download token: expired — mint a fresh one.');
+  }
+  const p = ensureDataDir(dataDir);
+  const rec = readJsonFile(p.tokensFile, {})[nonce];
+  if (!rec) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID, 'download token: unknown or revoked token.');
+  }
+  if (rec.used) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_USED, 'download token: already used — mint a fresh one.');
+  }
+  if (rec.paymentIntentId !== tokenPi) {
+    fail(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID, 'download token: record mismatch.');
+  }
+  const safe = sanitizeId(paymentIntentId);
+  if (tokenPi !== safe) {
+    fail(
+      WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_MISMATCH,
+      'download token: this token was minted for a different payment.'
+    );
+  }
+  return { paymentIntentId: tokenPi, nonce, exp };
+}
+
+/**
+ * Validate a download token AND mark it consumed (single-use).
+ * @returns {{ paymentIntentId: string, nonce: string, exp: number }}
+ */
+export function consumeDownloadToken(dataDir, args) {
+  const valid = peekDownloadToken(dataDir, args);
+  const p = ensureDataDir(dataDir);
+  const tokens = readJsonFile(p.tokensFile, {});
+  const rec = tokens[valid.nonce];
+  if (rec) {
+    rec.used = true;
+    rec.usedAt = new Date().toISOString();
+    writeFileSync(p.tokensFile, JSON.stringify(tokens, null, 2), 'utf8');
+  }
+  recordLedger(dataDir, { kind: 'download_token_used', paymentIntentId: valid.paymentIntentId });
+  return valid;
+}
+
+/**
+ * Find the paid receipt for a payment intent id (null when unpaid).
+ * The receipt store is the source of truth — buildPacket's
+ * PACKET_UNPAID gate and this lookup are two locks on the same door.
+ */
+export function findPaidReceiptByIntent(dataDir, paymentIntentId) {
+  const safe = sanitizeId(paymentIntentId);
+  if (!safe) return null;
+  const p = ensureDataDir(dataDir);
+  const receipts = readJsonFile(p.receiptsFile, {});
+  for (const receipt of Object.values(receipts)) {
+    if (receipt && receipt.paymentIntentId === safe) return receipt;
+  }
+  return null;
 }
 
 /* ── Event → receipt → packet pipeline ───────────────────────────── */
@@ -598,17 +807,120 @@ export function createCheckoutSessionHandler({ dataDir = DEFAULT_DATA_DIR } = {}
 }
 
 /**
- * Factory: GET /api/packet/:paymentIntentId handler.
- * Serves the generated printable packet as a download. 404 until a
- * signature-verified payment has produced one — the packet can never be
- * fetched before (or without) payment.
+ * Factory: POST /api/packet-token handler.
+ * Mints a single-use, 24h download token for a PAID payment intent.
+ * Body: { paymentIntentId }. The token is the only key that unlocks
+ * GET /api/packet — minting is free and unlimited for the payer, and
+ * requires a signature-free but receipt-backed proof of payment, so
+ * re-minting after an expired/consumed token never touches money.
  */
-export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR } = {}) {
-  return async function handlePacketDownload(req, res, paymentIntentId) {
+export function createPacketDownloadTokenHandler({ getDownloadSecret, dataDir = DEFAULT_DATA_DIR } = {}) {
+  return async function handlePacketDownloadToken(req, res) {
+    if (req.method !== 'POST') {
+      return sendJson(res, 405, {
+        error: { code: ERROR_CODES.METHOD_NOT_ALLOWED, message: 'Use POST.' },
+      });
+    }
+    let body;
+    try {
+      body = JSON.parse((await readRawBody(req)) || '{}');
+    } catch {
+      return sendJson(res, 400, {
+        error: { code: WEBHOOK_ERROR_CODES.EVENT_INVALID, message: 'Body must be valid JSON.' },
+      });
+    }
+    const paymentIntentId = body && body.paymentIntentId;
+    if (!sanitizeId(paymentIntentId)) {
+      return sendJson(res, 400, {
+        error: { code: WEBHOOK_ERROR_CODES.EVENT_INVALID, message: 'paymentIntentId is required.' },
+      });
+    }
+    const receipt = findPaidReceiptByIntent(dataDir, paymentIntentId);
+    if (!receipt) {
+      return sendJson(res, 404, {
+        error: {
+          code: WEBHOOK_ERROR_CODES.PACKET_NOT_READY,
+          message: 'No paid receipt for this payment intent — tokens are minted only after a succeeded $30 payment.',
+        },
+      });
+    }
+    let minted;
+    try {
+      minted = mintDownloadToken(dataDir, {
+        secret: getDownloadSecret(),
+        paymentIntentId,
+      });
+    } catch (e) {
+      if (e instanceof WebhookError) {
+        return sendJson(res, 500, { error: { code: e.code, message: e.message } });
+      }
+      throw e;
+    }
+    return sendJson(res, 200, {
+      paymentIntentId,
+      downloadToken: minted.token,
+      expiresAt: minted.expiresAt,
+      singleUse: true,
+    });
+  };
+}
+
+/**
+ * Factory: GET /api/packet/:paymentIntentId handler.
+ * Serves the generated printable packet as a download. Requires the
+ * single-use download token minted by POST /api/packet-token
+ * (query ?token=… or the x-download-token header) — the payment intent
+ * id alone never unlocks the packet.
+ * 404 until a signature-verified payment has produced one; 401/403 on
+ * a missing, invalid, expired, used, or mismatched token.
+ */
+export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR, getDownloadSecret } = {}) {
+  return async function handlePacketDownload(req, res, paymentIntentId, downloadToken) {
     if (req.method !== 'GET') {
       return sendJson(res, 405, {
         error: { code: ERROR_CODES.METHOD_NOT_ALLOWED, message: 'Use GET.' },
       });
+    }
+    const safe = sanitizeId(paymentIntentId);
+    if (!safe) {
+      return sendJson(res, 404, {
+        error: {
+          code: WEBHOOK_ERROR_CODES.PACKET_NOT_READY,
+          message: 'No packet for this payment yet — it is generated only after a succeeded $30 payment.',
+        },
+      });
+    }
+    if (!getDownloadSecret) {
+      // Programming error, not a client problem — fail closed.
+      throw new WebhookError(
+        WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING,
+        'packet download: no download-secret configured.'
+      );
+    }
+    // Token gate BEFORE touching the packet: knowing the URL is not proof.
+    try {
+      peekDownloadToken(dataDir, {
+        secret: getDownloadSecret(),
+        paymentIntentId: safe,
+        token: downloadToken,
+      });
+    } catch (e) {
+      if (e instanceof WebhookError) {
+        const status =
+          e.code === WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_EXPIRED ||
+          e.code === WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_USED
+            ? 403
+            : 401;
+        recordLedger(dataDir, {
+          kind: 'packet_download_refused',
+          paymentIntentId: safe,
+          reason: e.code,
+        });
+        return sendJson(res, status, {
+          error: { code: e.code, message: e.message },
+        });
+      }
+      throw e;
     }
     let html;
     try {
@@ -633,10 +945,18 @@ export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR } = {})
         },
       });
     }
+    // Single-use: the token is consumed ONLY after the packet proved
+    // intact and is about to stream — a failed integrity check or a
+    // missing packet does not burn the payer's download.
+    consumeDownloadToken(dataDir, {
+      secret: getDownloadSecret(),
+      paymentIntentId: safe,
+      token: downloadToken,
+    });
     recordLedger(dataDir, { kind: 'packet_downloaded', paymentIntentId });
-    // paymentIntentId is allowlist-sanitized by loadPacketHtml before this
-    // point — SAFE_ID permits no quotes, CR, or LF, so the interpolated
-    // filename cannot inject response headers.
+    // paymentIntentId is allowlist-sanitized above — SAFE_ID permits no
+    // quotes, CR, or LF, so the interpolated filename cannot inject
+    // response headers.
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Disposition': `attachment; filename="divorce-packet-${paymentIntentId}.html"`,
@@ -653,14 +973,16 @@ export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR } = {})
  *   POST /api/create-payment-intent (fixed $30, test-mode safe)
  *   POST /api/checkout-session      (questionnaire intake for the webhook)
  *   POST /api/stripe-webhook        (signature-verified fulfillment)
- *   GET  /api/packet/:paymentIntentId (paid packet download)
+ *   POST /api/packet-token          (mint a single-use download token; needs a paid receipt)
+ *   GET  /api/packet/:paymentIntentId?token=… (paid packet download)
  *
- * The mutation endpoints (/api/create-payment-intent, /api/checkout-session)
- * are rate-limited per client IP (server/rate-limit.mjs): abuse there burns
- * Stripe API calls or disk writes. The webhook endpoint is NOT rate-limited —
- * Stripe retries deliveries with backoff, and a strict limiter could drop a
- * retry carrying money. The packet download sends privacy headers (no-store,
- * nosniff, no-referrer) because it is a sensitive legal document.
+ * The mutation endpoints (/api/create-payment-intent, /api/checkout-session,
+ * /api/packet-token) are rate-limited per client IP (server/rate-limit.mjs):
+ * abuse there burns Stripe API calls or disk writes. The webhook endpoint
+ * is NOT rate-limited — Stripe retries deliveries with backoff, and a
+ * strict limiter could drop a retry carrying money. The packet download
+ * sends privacy headers (no-store, nosniff, no-referrer) because it is a
+ * sensitive legal document.
  *
  * The original payment-only startServer in stripe-payment-server.mjs is
  * left untouched — this is the one the end-to-end drill uses.
@@ -672,7 +994,14 @@ export function startCheckoutServer({ port = 8787, env = process.env, dataDir = 
     dataDir,
   });
   const sessionHandler = createCheckoutSessionHandler({ dataDir });
-  const downloadHandler = createPacketDownloadHandler({ dataDir });
+  const downloadTokenHandler = createPacketDownloadTokenHandler({
+    getDownloadSecret: () => loadDownloadSecret(env),
+    dataDir,
+  });
+  const downloadHandler = createPacketDownloadHandler({
+    dataDir,
+    getDownloadSecret: () => loadDownloadSecret(env),
+  });
   const limiter = createRateLimiter();
 
   /** Per-IP rate gate for the mutation endpoints (not the webhook — see above). */
@@ -699,14 +1028,21 @@ export function startCheckoutServer({ port = 8787, env = process.env, dataDir = 
 
   const gatedIntentHandler = rateGated('create-payment-intent', intentHandler);
   const gatedSessionHandler = rateGated('checkout-session', sessionHandler);
+  const gatedTokenHandler = rateGated('packet-token', downloadTokenHandler);
 
   const server = createServer((req, res) => {
-    const pathname = new URL(req.url, 'http://x').pathname;
+    const url = new URL(req.url, 'http://x');
+    const pathname = url.pathname;
     if (pathname === '/api/create-payment-intent') return gatedIntentHandler(req, res);
     if (pathname === '/api/stripe-webhook') return webhookHandler(req, res);
     if (pathname === '/api/checkout-session') return gatedSessionHandler(req, res);
+    if (pathname === '/api/packet-token') return gatedTokenHandler(req, res);
     const packetMatch = /^\/api\/packet\/([^/]+)$/.exec(pathname);
-    if (packetMatch) return downloadHandler(req, res, decodeURIComponent(packetMatch[1]));
+    if (packetMatch) {
+      // Download token via query (?token=…) or the x-download-token header.
+      const downloadToken = url.searchParams.get('token') || req.headers['x-download-token'] || null;
+      return downloadHandler(req, res, decodeURIComponent(packetMatch[1]), downloadToken);
+    }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { code: 'NOT_FOUND', message: 'Not found.' } }));
   });

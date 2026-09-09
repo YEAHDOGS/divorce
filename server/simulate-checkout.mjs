@@ -8,8 +8,12 @@
  *      $30.00 USD, metadata.packet_id = sessionId) and signs it with the
  *      local webhook secret, exactly like the provider would
  *   3. POST /api/stripe-webhook with the Stripe-Signature header → packetId
- *   4. GET  /api/packet/<paymentIntentId> → saves ./packet-<pi>.html
- *   5. --resend: delivers the SAME event again → proves idempotent dedupe
+ *   4. GET  /api/packet/<paymentIntentId> WITHOUT a token → 401 (proves the
+ *      payment intent id alone never unlocks the packet)
+ *   5. POST /api/packet-token { paymentIntentId } → single-use download token
+ *   6. GET  /api/packet/<paymentIntentId>?token=… → saves ./packet-<pi>.html,
+ *      then the SAME token used again → 403 DOWNLOAD_TOKEN_USED (single-use)
+ *   7. --resend: delivers the SAME event again → proves idempotent dedupe
  *
  * Nothing here imports Stripe, reads a Stripe key, or touches any network
  * host except localhost. The secret is a local test-mode placeholder — the
@@ -156,7 +160,7 @@ async function main() {
     const answers = args.answersFile
       ? JSON.parse(readFileSync(args.answersFile, 'utf8'))
       : { ...FIXTURE_ANSWERS };
-    log('1/4 creating checkout session …');
+    log('1/5 creating checkout session …');
     const sessionRes = await fetch(`${base}/api/checkout-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -189,7 +193,7 @@ async function main() {
     const signatureHeader = `t=${timestamp},v1=${sig}`;
 
     // 3) Deliver the webhook.
-    log('2/4 delivering signed webhook …');
+    log('2/5 delivering signed webhook …');
     const deliver = async () =>
       fetch(`${base}/api/stripe-webhook`, {
         method: 'POST',
@@ -206,8 +210,20 @@ async function main() {
         die(`expected payment_failed to be ignored, got ${JSON.stringify(hookJson)}`);
       log('    payment_failed recorded as ignored — no packet, no receipt');
       const checkRes = await fetch(`${base}/api/packet/${paymentIntentId}`);
-      if (checkRes.status !== 404) die(`declined payment must leave NO packet (got ${checkRes.status})`);
-      log('    GET /api/packet → 404: the declined payment cannot unlock a download');
+      if (checkRes.status !== 401) die(`declined payment download must be refused without a token (got ${checkRes.status})`);
+      const checkJson = await checkRes.json();
+      if (checkJson.error?.code !== 'DOWNLOAD_TOKEN_INVALID')
+        die(`expected DOWNLOAD_TOKEN_INVALID, got ${JSON.stringify(checkJson)}`);
+      log('    GET /api/packet → 401: a declined payment has no token and no packet');
+      const mintRes = await fetch(`${base}/api/packet-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId }),
+      });
+      const mintJson = await mintRes.json();
+      if (mintRes.status !== 404 || mintJson.error?.code !== 'PACKET_NOT_READY')
+        die(`token mint for a declined payment must fail closed (got ${mintRes.status} ${JSON.stringify(mintJson)})`);
+      log('    POST /api/packet-token → 404 PACKET_NOT_READY: no receipt, no token');
       // Show the recovery copy the checkout modal presents for a decline.
       const copy = classifyPaymentFailure({ code: 'DECLINED' }, { testMode: true });
       if (copy.kind !== FAILURE_KINDS.DECLINED || copy.charged !== 'no')
@@ -224,17 +240,37 @@ async function main() {
     log(`    fulfilled: packetId=${hookJson.packetId} receiptId=${hookJson.receiptId}`);
 
     if (args.resend) {
-      log('3/4 re-delivering the same event (dedupe proof) …');
+      log('3/5 re-delivering the same event (dedupe proof) …');
       const again = await deliver();
       const againJson = await again.json();
       if (againJson.deduped !== true) die(`expected deduped:true, got ${JSON.stringify(againJson)}`);
       log('    deduped:true — no double payment, no second packet');
     }
 
-    // 4) Download the paid packet.
-    const step = args.resend ? '4/4' : '3/4';
-    log(`${step} downloading the paid packet …`);
-    const dlRes = await fetch(`${base}/api/packet/${paymentIntentId}`);
+    // 3 or 4) Prove the payment intent id alone does NOT unlock the packet,
+    // then mint a single-use download token for the paid receipt.
+    const step = args.resend ? '4/5' : '3/5';
+    log(`${step} download token gate: id alone must not work …`);
+    const bare = await fetch(`${base}/api/packet/${paymentIntentId}`);
+    if (bare.status !== 401) die(`tokenless download must be refused (got ${bare.status})`);
+    const bareJson = await bare.json();
+    if (bareJson.error?.code !== 'DOWNLOAD_TOKEN_INVALID')
+      die(`expected DOWNLOAD_TOKEN_INVALID, got ${JSON.stringify(bareJson)}`);
+    log('    401 DOWNLOAD_TOKEN_INVALID — the payment intent id alone is not proof of payment');
+    const mintRes = await fetch(`${base}/api/packet-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paymentIntentId }),
+    });
+    const mintJson = await mintRes.json();
+    if (!mintRes.ok || !mintJson.downloadToken || mintJson.singleUse !== true)
+      die(`token mint failed: ${mintRes.status} ${JSON.stringify(mintJson)}`);
+    log(`    minted single-use token (expires ${mintJson.expiresAt})`);
+
+    // 4 or 5) Download the paid packet WITH the token; prove single-use.
+    const dlStep = args.resend ? '5/5' : '4/5';
+    log(`${dlStep} downloading the paid packet with the token …`);
+    const dlRes = await fetch(`${base}/api/packet/${paymentIntentId}?token=${encodeURIComponent(mintJson.downloadToken)}`);
     if (!dlRes.ok) die(`packet download failed: ${dlRes.status} ${await dlRes.text()}`);
     const html = await dlRes.text();
     const outFile = join(args.outDir, `packet-${paymentIntentId}.html`);
@@ -242,7 +278,13 @@ async function main() {
     writeFileSync(outFile, html, 'utf8');
     log(`    saved ${outFile} (${html.length} bytes)`);
     if (!html.includes('$30.00')) die('downloaded packet is missing the $30.00 price line');
-    log('DONE — $30 staging flow complete: session → signed webhook → ledger → packet → download.');
+    const reuse = await fetch(`${base}/api/packet/${paymentIntentId}?token=${encodeURIComponent(mintJson.downloadToken)}`);
+    if (reuse.status !== 403) die(`a used token must be refused (got ${reuse.status})`);
+    const reuseJson = await reuse.json();
+    if (reuseJson.error?.code !== 'DOWNLOAD_TOKEN_USED')
+      die(`expected DOWNLOAD_TOKEN_USED, got ${JSON.stringify(reuseJson)}`);
+    log('    second use of the same token → 403 DOWNLOAD_TOKEN_USED (single-use confirmed)');
+    log('DONE — $30 staging flow complete: session → signed webhook → ledger → packet → token → download.');
   } finally {
     await stop();
   }

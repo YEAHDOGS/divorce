@@ -43,7 +43,10 @@ Expected: `200` with `paymentIntentId`, `clientSecret`, `amountCents: 3000`.
 5. Verify in the [Stripe test dashboard](https://dashboard.stripe.com/test/payments):
    a payment of exactly **$30.00 USD** exists.
 6. Packet unlock: the printable packet download is gated on a succeeded payment
-   (see the pre-flight work on branch `jack/divorce-preflight`).
+   (see the pre-flight work on branch `jack/divorce-preflight`):
+   `POST /api/packet-token { paymentIntentId }` → single-use download token
+   (24h expiry), then `GET /api/packet/<paymentIntentId>?token=…`. The payment
+   intent id alone is refused with `401 DOWNLOAD_TOKEN_INVALID`.
 
 ## Safety rules (built into the server)
 
@@ -77,14 +80,25 @@ What it proves:
    event id, records the $30 payment in `server/data/ledger.jsonl`
 3. The packet is generated through the pre-flight + printable-output gates
 4. `--resend` delivers the same event again → `deduped:true`, no double packet
-5. `GET /api/packet/<paymentIntentId>` downloads the printable packet HTML
+5. `GET /api/packet/<paymentIntentId>` with NO token → `401
+   DOWNLOAD_TOKEN_INVALID`: the payment intent id alone never unlocks the
+   packet — knowing the URL is not the same as having paid
+6. `POST /api/packet-token { paymentIntentId }` mints a single-use,
+   24h-expiring HMAC-signed download token (needs the paid receipt)
+7. `GET /api/packet/<paymentIntentId>?token=…` downloads the printable packet
+   HTML (integrity-digest verified, privacy headers set); the same token a
+   second time → `403 DOWNLOAD_TOKEN_USED` (single-use)
 
-The secret is a local-drill placeholder — the server must run with the same
-`STRIPE_WEBHOOK_SECRET` value. `server/data/` is gitignored staging storage.
+The token secret is the same local-drill placeholder
+(`STRIPE_WEBHOOK_SECRET`) unless you set a dedicated
+`DOWNLOAD_TOKEN_SECRET`. The server must run with the same value.
+`server/data/` is gitignored staging storage.
 
 Negative paths (all covered by `server/stripe-webhook.test.js`):
 - bad/missing/stale signature → 400, nothing processed
 - `payment_intent.payment_failed` → recorded as ignored, NO packet
 - wrong amount (not exactly 3000 usd) → rejected, NO packet, NO receipt
 - unknown session → rejected, NO packet
-- packet download before payment → 404 PACKET_NOT_READY
+- packet download before payment → 401 (token gate) / 404 at the token mint
+- download with no/invalid/expired/used/mismatched token → 401/403, no bytes
+  served, token never burned on a failed integrity check
