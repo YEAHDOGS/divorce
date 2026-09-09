@@ -1,6 +1,7 @@
 <script>
   import { t, isLoading } from "svelte-i18n";
   import LanguageSelector from "./components/LanguageSelector.svelte";
+  import CheckoutModal from "./components/CheckoutModal.svelte";
 
   // Import SVG assets as static resource URLs
   import logo from "./assets/logo.svg";
@@ -8,6 +9,14 @@
 
   // Constant configurations for layout metrics
   const APP_MAX_WIDTH = "max-w-7xl";
+
+  // Staging checkout state: the modal is the $30 money step of the demo.
+  let checkoutOpen = $state(false);
+  let lastReceipt = $state(null);
+
+  function handleCheckoutSuccess(receipt) {
+    lastReceipt = receipt;
+  }
 </script>
 
 <!-- Dynamic Metadata Head tags managed via svelte-i18n -->
@@ -151,6 +160,30 @@
       </div>
     </div>
 
+    <!-- STAGING CHECKOUT: the $30 money step of the demo. Test mode only. -->
+    {#if !lastReceipt}
+      <div
+        class="w-full mx-auto {APP_MAX_WIDTH} flex items-center justify-center z-10 mb-3"
+      >
+        <button
+          type="button"
+          onclick={() => (checkoutOpen = true)}
+          class="rounded-xl bg-[#ff3344] px-5 py-2.5 sm:px-6 sm:py-3 text-sm sm:text-base font-bold text-white
+                 hover:bg-[#ff5566] transition-colors shadow-lg shadow-[#ff3344]/20"
+        >
+          Pay $30 — staging checkout
+        </button>
+      </div>
+    {:else}
+      <div
+        class="w-full mx-auto {APP_MAX_WIDTH} flex items-center justify-center z-10 mb-3"
+      >
+        <p class="text-xs sm:text-sm text-emerald-300 font-mono">
+          Paid (test mode, no money moved) — receipt {lastReceipt.id}
+        </p>
+      </div>
+    {/if}
+
     <!-- BOTTOM FOOTER -->
     <footer
       class="w-full mx-auto {APP_MAX_WIDTH} pt-3 border-t border-white/5 text-center sm:text-left z-10"
@@ -168,6 +201,13 @@
       </div>
     </footer>
   {/if}
+
+  <!-- Staging checkout dialog (mounted at root, renders only when open). -->
+  <CheckoutModal
+    open={checkoutOpen}
+    onsuccess={handleCheckoutSuccess}
+    onclose={() => (checkoutOpen = false)}
+  />
 </main>
 
 <style lang="scss">
