@@ -146,7 +146,9 @@ export function confirmTestPayment(intentId, card = { last4: TEST_CARD.last4 }, 
 }
 
 /**
- * Validate a receipt object: succeeded, $30, unmistakably test-mode.
+ * Validate a receipt object: succeeded, $30, for the uncontested packet,
+ * USD, and unmistakably test-mode. A receipt for any other product,
+ * currency, or intent id can never unlock the packet.
  * @returns {boolean}
  */
 export function isValidTestReceipt(receipt) {
@@ -155,7 +157,25 @@ export function isValidTestReceipt(receipt) {
     receipt.testMode === true &&
     receipt.status === 'succeeded' &&
     receipt.amount === PRODUCT.amountCents &&
+    receipt.currency === PRODUCT.currency &&
+    receipt.productId === PRODUCT.id &&
+    typeof receipt.paymentIntentId === 'string' &&
+    receipt.paymentIntentId.startsWith('pi_test_') &&
     typeof receipt.id === 'string' &&
     receipt.id.startsWith('rcpt_test_')
   );
+}
+
+/**
+ * Sanitize a card-number input to digits only, grouped in fours and capped
+ * at 16 digits (19 display chars). Keeps the simulated card field free of
+ * injected junk and consistent for the fixture confirmation.
+ * @param {string} value raw input value
+ * @returns {string} digits only, grouped "4242 4242 4242 4242" style
+ */
+export function sanitizeCardDigits(value) {
+  const digits = String(value || '').replace(/\D/g, '').slice(0, 16);
+  const groups = [];
+  for (let i = 0; i < digits.length; i += 4) groups.push(digits.slice(i, i + 4));
+  return groups.join(' ');
 }
