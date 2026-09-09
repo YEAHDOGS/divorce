@@ -213,6 +213,36 @@ describe('loadWebhookSecret', () => {
       expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING })
     );
   });
+
+  it('fails closed on a weak (short) secret — a guessable HMAC key is not a secret', () => {
+    expect(() => loadWebhookSecret({ STRIPE_MODE: 'test', STRIPE_WEBHOOK_SECRET: 'abc123' })).toThrowError(
+      expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING })
+    );
+    // 15 chars is still short: the boundary is 16.
+    expect(() =>
+      loadWebhookSecret({ STRIPE_MODE: 'test', STRIPE_WEBHOOK_SECRET: '123456789012345' })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING }));
+  });
+
+  it('accepts a 16-char secret (the strength boundary)', () => {
+    expect(loadWebhookSecret({ STRIPE_MODE: 'test', STRIPE_WEBHOOK_SECRET: '1234567890123456' })).toBe(
+      '1234567890123456'
+    );
+  });
+});
+
+describe('loadDownloadSecret', () => {
+  it('rejects a weak dedicated DOWNLOAD_TOKEN_SECRET', () => {
+    expect(() =>
+      loadDownloadSecret({ STRIPE_MODE: 'test', DOWNLOAD_TOKEN_SECRET: 'short' })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING }));
+  });
+
+  it('rejects a weak STRIPE_WEBHOOK_SECRET fallback', () => {
+    expect(() =>
+      loadDownloadSecret({ STRIPE_MODE: 'test', STRIPE_WEBHOOK_SECRET: 'weak' })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING }));
+  });
 });
 
 /* ── Handler: signature failures → 400, nothing processed ─────────── */
@@ -573,15 +603,17 @@ describe('GET /api/packet/:paymentIntentId', () => {
 
 describe('loadDownloadSecret', () => {
   it('prefers the dedicated DOWNLOAD_TOKEN_SECRET', () => {
-    expect(loadDownloadSecret({ DOWNLOAD_TOKEN_SECRET: 'dedicated', STRIPE_WEBHOOK_SECRET: 'fallback' })).toBe(
-      'dedicated'
+    // Strength gate now applies: routing fixtures must be 16+ chars.
+    expect(loadDownloadSecret({ DOWNLOAD_TOKEN_SECRET: 'token-secret-fixture-01' })).toBe(
+      'token-secret-fixture-01'
     );
   });
 
   it('falls back to STRIPE_WEBHOOK_SECRET so the staging drill needs one secret', () => {
-    expect(loadDownloadSecret({ STRIPE_WEBHOOK_SECRET: 'whsec_fallback' })).toBe('whsec_fallback');
+    expect(loadDownloadSecret({ STRIPE_WEBHOOK_SECRET: 'webhook-secret-fixture-01' })).toBe(
+      'webhook-secret-fixture-01'
+    );
   });
-
   it('fails closed when no secret is set', () => {
     expect(() => loadDownloadSecret({})).toThrowError(
       expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING })
