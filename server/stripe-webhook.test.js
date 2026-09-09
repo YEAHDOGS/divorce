@@ -21,12 +21,14 @@ import {
   signTestWebhook,
   parseSignatureHeader,
   loadWebhookSecret,
+  loadDownloadSecret,
   saveSession,
   loadSession,
   isEventProcessed,
   markEventProcessed,
   recordPaidReceipt,
   isPaidReceipt,
+  findPaidReceiptByIntent,
   webhookProvider,
   savePacketHtml,
   loadPacketHtml,
@@ -37,7 +39,12 @@ import {
   parseEvent,
   createWebhookHandler,
   createCheckoutSessionHandler,
+  createPacketDownloadTokenHandler,
   createPacketDownloadHandler,
+  mintDownloadToken,
+  peekDownloadToken,
+  consumeDownloadToken,
+  DOWNLOAD_TOKEN_TTL_SEC,
 } from './stripe-webhook.mjs';
 import { buildPacket } from '../src/lib/packet.js';
 
@@ -466,39 +473,261 @@ describe('POST /api/checkout-session', () => {
 /* ── Packet download ──────────────────────────────────────────────── */
 
 describe('GET /api/packet/:paymentIntentId', () => {
-  it('404s before any payment (packet never exists pre-payment)', async () => {
-    const handler = createPacketDownloadHandler({ dataDir });
+  /** Download handler wired with the fixture token secret. */
+  const dlHandler = () => createPacketDownloadHandler({ dataDir, getDownloadSecret: () => FIXTURE_SECRET });
+  /** Record a paid receipt and mint a download token for it. */
+  const paidToken = (paymentIntentId, { nowMs } = {}) => {
+    recordPaidReceipt(dataDir, {
+      id: `rcpt_${paymentIntentId}`,
+      paymentIntentId,
+      amount: 3000,
+      currency: 'usd',
+    });
+    return mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId, nowMs });
+  };
+
+  it('401s before any payment: no token exists and the id alone never unlocks', async () => {
+    const handler = dlHandler();
     const res = fakeRes();
-    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_test_1');
-    expect(res.status).toBe(404);
-    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.PACKET_NOT_READY);
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_test_1', null);
+    expect(res.status).toBe(401);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID);
   });
 
-  it('serves the paid packet as an attachment download', async () => {
+  it('401s even when a packet exists but no token is presented', async () => {
     savePacketHtml(dataDir, 'pi_sim_test_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
-    const handler = createPacketDownloadHandler({ dataDir });
+    const handler = dlHandler();
     const res = fakeRes();
-    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_test_1');
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_test_1', null);
+    expect(res.status).toBe(401);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID);
+  });
+
+  it('serves the paid packet as an attachment download with a valid token', async () => {
+    savePacketHtml(dataDir, 'pi_sim_test_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    const { token } = paidToken('pi_sim_test_1');
+    const handler = dlHandler();
+    const res = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_test_1', token);
     expect(res.status).toBe(200);
     expect(res.headers['Content-Type']).toContain('text/html');
     expect(res.headers['Content-Disposition']).toContain('attachment');
     expect(res.text()).toContain('PACKET');
   });
 
+  it('403s when the same single-use token is presented twice', async () => {
+    savePacketHtml(dataDir, 'pi_sim_test_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    const { token } = paidToken('pi_sim_test_1');
+    const handler = dlHandler();
+    const first = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), first, 'pi_sim_test_1', token);
+    expect(first.status).toBe(200);
+    const second = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), second, 'pi_sim_test_1', token);
+    expect(second.status).toBe(403);
+    expect(second.json().error.code).toBe(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_USED);
+  });
+
+  it('401s when a token minted for one payment is used for another', async () => {
+    savePacketHtml(dataDir, 'pi_sim_test_2', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    const { token } = paidToken('pi_sim_test_1');
+    const handler = dlHandler();
+    const res = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_test_2', token);
+    expect(res.status).toBe(401);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_MISMATCH);
+  });
+
+  it('does not burn a valid token when the packet is not ready yet', async () => {
+    const { token } = paidToken('pi_sim_unpaid_1');
+    const handler = dlHandler();
+    const first = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), first, 'pi_sim_unpaid_1', token);
+    expect(first.status).toBe(404);
+    expect(first.json().error.code).toBe(WEBHOOK_ERROR_CODES.PACKET_NOT_READY);
+    // The payer still has their download: the token was NOT consumed.
+    savePacketHtml(dataDir, 'pi_sim_unpaid_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
+    const second = fakeRes();
+    await handler(fakeReq({ method: 'GET' }), second, 'pi_sim_unpaid_1', token);
+    expect(second.status).toBe(200);
+  });
+
   it('rejects path traversal without touching the filesystem', async () => {
     expect(sanitizeId('../../etc/passwd')).toBeNull();
     expect(sanitizeId('pi_ok-123_ABC')).toBe('pi_ok-123_ABC');
     expect(loadPacketHtml(dataDir, '../../etc/passwd')).toBeNull();
-    const handler = createPacketDownloadHandler({ dataDir });
+    const handler = dlHandler();
     const res = fakeRes();
-    await handler(fakeReq({ method: 'GET' }), res, '..%2F..%2Fetc');
+    await handler(fakeReq({ method: 'GET' }), res, '..%2F..%2Fetc', null);
     expect(res.status).toBe(404);
   });
 
   it('405s on POST', async () => {
-    const handler = createPacketDownloadHandler({ dataDir });
+    const handler = dlHandler();
     const res = fakeRes();
-    await handler(fakeReq({ method: 'POST' }), res, 'pi_sim_test_1');
+    await handler(fakeReq({ method: 'POST' }), res, 'pi_sim_test_1', null);
+    expect(res.status).toBe(405);
+  });
+});
+
+describe('loadDownloadSecret', () => {
+  it('prefers the dedicated DOWNLOAD_TOKEN_SECRET', () => {
+    expect(loadDownloadSecret({ DOWNLOAD_TOKEN_SECRET: 'dedicated', STRIPE_WEBHOOK_SECRET: 'fallback' })).toBe(
+      'dedicated'
+    );
+  });
+
+  it('falls back to STRIPE_WEBHOOK_SECRET so the staging drill needs one secret', () => {
+    expect(loadDownloadSecret({ STRIPE_WEBHOOK_SECRET: 'whsec_fallback' })).toBe('whsec_fallback');
+  });
+
+  it('fails closed when no secret is set', () => {
+    expect(() => loadDownloadSecret({})).toThrowError(
+      expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING })
+    );
+  });
+
+  it('refuses live mode unless explicitly opted in', () => {
+    expect(() =>
+      loadDownloadSecret({ STRIPE_MODE: 'live', DOWNLOAD_TOKEN_SECRET: 'x' })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.TEST_MODE_VIOLATION }));
+  });
+});
+
+describe('download token mint / verify / consume', () => {
+  it('round-trips: mint → peek valid → consume → peek fails as used', () => {
+    const { token } = mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_1' });
+    const valid = peekDownloadToken(dataDir, {
+      secret: FIXTURE_SECRET,
+      paymentIntentId: 'pi_tok_1',
+      token,
+    });
+    expect(valid.paymentIntentId).toBe('pi_tok_1');
+    consumeDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_1', token });
+    expect(() =>
+      peekDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_1', token })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_USED }));
+  });
+
+  it('rejects a signature made with the wrong secret', () => {
+    const { token } = mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_2' });
+    expect(() =>
+      peekDownloadToken(dataDir, { secret: WRONG_SECRET, paymentIntentId: 'pi_tok_2', token })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID }));
+  });
+
+  it('rejects an expired token', () => {
+    let now = 1_000_000_000_000;
+    const { token } = mintDownloadToken(dataDir, {
+      secret: FIXTURE_SECRET,
+      paymentIntentId: 'pi_tok_3',
+      ttlSec: 60,
+      nowMs: () => now,
+    });
+    now += (60 + 1) * 1000; // past expiry
+    expect(() =>
+      peekDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_3', token, nowMs: () => now })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_EXPIRED }));
+  });
+
+  it('defaults to a 24h TTL', () => {
+    expect(DOWNLOAD_TOKEN_TTL_SEC).toBe(86400);
+    const before = Math.floor(Date.now() / 1000);
+    const { token } = mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_4' });
+    const { exp } = peekDownloadToken(dataDir, {
+      secret: FIXTURE_SECRET,
+      paymentIntentId: 'pi_tok_4',
+      token,
+    });
+    expect(exp - before).toBeGreaterThanOrEqual(86400 - 1);
+    expect(exp - before).toBeLessThanOrEqual(86400 + 1);
+  });
+
+  it('rejects a token presented for a different payment intent', () => {
+    const { token } = mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_5' });
+    expect(() =>
+      peekDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_other', token })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_MISMATCH }));
+  });
+
+  it('rejects malformed tokens without touching secrets', () => {
+    for (const bad of [null, '', 'no-dot-here', 'abc.def', `${Buffer.from('x').toString('base64url')}.deadbeef`]) {
+      expect(() =>
+        peekDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_6', token: bad })
+      ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_INVALID }));
+    }
+  });
+
+  it('prunes expired records so the store stays bounded', () => {
+    let now = 2_000_000_000_000;
+    const { token } = mintDownloadToken(dataDir, {
+      secret: FIXTURE_SECRET,
+      paymentIntentId: 'pi_tok_7',
+      ttlSec: 10,
+      nowMs: () => now,
+    });
+    now += 11_000;
+    expect(() =>
+      peekDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_7', token, nowMs: () => now })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_EXPIRED }));
+    // Expired records are pruned from the store (signature/expiry are still
+    // checked first, so a re-presented expired token keeps failing as EXPIRED).
+    const store = JSON.parse(readFileSync(join(dataDir, 'download-tokens.json'), 'utf8'));
+    expect(Object.keys(store)).toHaveLength(0);
+    expect(() =>
+      peekDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_tok_7', token, nowMs: () => now })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.DOWNLOAD_TOKEN_EXPIRED }));
+  });
+
+  it('findPaidReceiptByIntent returns the paid receipt for the intent, null when unpaid', () => {
+    expect(findPaidReceiptByIntent(dataDir, 'pi_unpaid_x')).toBeNull();
+    recordPaidReceipt(dataDir, { id: 'rcpt_x', paymentIntentId: 'pi_paid_x', amount: 3000, currency: 'usd' });
+    expect(findPaidReceiptByIntent(dataDir, 'pi_paid_x')?.id).toBe('rcpt_x');
+    expect(findPaidReceiptByIntent(dataDir, '../../etc/passwd')).toBeNull();
+  });
+});
+
+describe('POST /api/packet-token', () => {
+  const tokenHandler = () =>
+    createPacketDownloadTokenHandler({ getDownloadSecret: () => FIXTURE_SECRET, dataDir });
+
+  it('404s when there is no paid receipt for the intent', async () => {
+    const res = fakeRes();
+    await tokenHandler()(fakeReq({ body: { paymentIntentId: 'pi_unpaid_y' } }), res);
+    expect(res.status).toBe(404);
+    expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.PACKET_NOT_READY);
+  });
+
+  it('mints a single-use token once a paid receipt exists', async () => {
+    recordPaidReceipt(dataDir, { id: 'rcpt_y', paymentIntentId: 'pi_paid_y', amount: 3000, currency: 'usd' });
+    const res = fakeRes();
+    await tokenHandler()(fakeReq({ body: { paymentIntentId: 'pi_paid_y' } }), res);
+    expect(res.status).toBe(200);
+    const json = res.json();
+    expect(typeof json.downloadToken).toBe('string');
+    expect(json.singleUse).toBe(true);
+    expect(json.paymentIntentId).toBe('pi_paid_y');
+    // The minted token verifies for exactly this payment.
+    const valid = peekDownloadToken(dataDir, {
+      secret: FIXTURE_SECRET,
+      paymentIntentId: 'pi_paid_y',
+      token: json.downloadToken,
+    });
+    expect(valid.paymentIntentId).toBe('pi_paid_y');
+  });
+
+  it('400s on a missing paymentIntentId and on non-JSON', async () => {
+    const missing = fakeRes();
+    await tokenHandler()(fakeReq({ body: {} }), missing);
+    expect(missing.status).toBe(400);
+    const notJson = fakeRes();
+    await tokenHandler()(fakeReq({ body: 'not-json{' }), notJson);
+    expect(notJson.status).toBe(400);
+  });
+
+  it('405s on GET', async () => {
+    const res = fakeRes();
+    await tokenHandler()(fakeReq({ method: 'GET' }), res);
     expect(res.status).toBe(405);
   });
 });
@@ -546,9 +775,10 @@ import {
 describe('GET /api/packet/:paymentIntentId — privacy headers', () => {
   it('sends no-store / nosniff / no-referrer on the paid download', async () => {
     savePacketHtml(dataDir, 'pi_sim_priv_1', '<!DOCTYPE html><html><body>PACKET</body></html>');
-    const handler = createPacketDownloadHandler({ dataDir });
+    const { token } = mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_sim_priv_1' });
+    const handler = createPacketDownloadHandler({ dataDir, getDownloadSecret: () => FIXTURE_SECRET });
     const res = fakeRes();
-    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_priv_1');
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_priv_1', token);
     expect(res.status).toBe(200);
     expect(res.headers['Cache-Control']).toBe(PACKET_DOWNLOAD_HEADERS['Cache-Control']);
     expect(res.headers['Cache-Control']).toContain('no-store');
@@ -558,9 +788,9 @@ describe('GET /api/packet/:paymentIntentId — privacy headers', () => {
   });
 
   it('rejects a quote-injection id as an invalid id (never touches the header)', async () => {
-    const handler = createPacketDownloadHandler({ dataDir });
+    const handler = createPacketDownloadHandler({ dataDir, getDownloadSecret: () => FIXTURE_SECRET });
     const res = fakeRes();
-    await handler(fakeReq({ method: 'GET' }), res, 'pi_x"\r\nX-Injected: 1');
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_x"\r\nX-Injected: 1', null);
     expect(res.status).toBe(404);
     expect(res.headers['Content-Disposition'] || '').not.toContain('X-Injected');
   });
@@ -714,9 +944,10 @@ describe('packet integrity digests', () => {
   it('download handler 502s (never serves) a tampered packet and logs it', async () => {
     savePacketHtml(dataDir, 'pi_sim_dig_4', '<html>INTACT</html>');
     writeFileSync(join(dataDir, 'packets', 'pi_sim_dig_4.html'), '<html>SWAPPED</html>', 'utf8');
-    const handler = createPacketDownloadHandler({ dataDir });
+    const { token } = mintDownloadToken(dataDir, { secret: FIXTURE_SECRET, paymentIntentId: 'pi_sim_dig_4' });
+    const handler = createPacketDownloadHandler({ dataDir, getDownloadSecret: () => FIXTURE_SECRET });
     const res = fakeRes();
-    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_dig_4');
+    await handler(fakeReq({ method: 'GET' }), res, 'pi_sim_dig_4', token);
     expect(res.status).toBe(502);
     expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.PACKET_INTEGRITY_FAILED);
     expect(res.text()).not.toContain('SWAPPED');
