@@ -58,6 +58,10 @@
       <p class="mt-4 sm:mt-5 text-center text-[11px] sm:text-xs md:text-sm text-neutral-600 font-medium tracking-wide">
         {$t("pricing.guarantee")}
       </p>
+
+      <p class="mt-3 sm:mt-4 mx-auto max-w-xl text-center text-[10px] sm:text-xs text-neutral-500 leading-relaxed">
+        {$t("pricing.fees_note")}
+      </p>
     </div>
   </div>
 </section>
