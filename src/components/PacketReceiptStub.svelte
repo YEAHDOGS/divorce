@@ -1,17 +1,43 @@
 <!--
-  PacketReceiptStub.svelte — printable paid-receipt / packet stub page.
+  PacketReceiptStub.svelte — printable paid-receipt + packet unlock page.
 
-  Shown after a successful TEST-MODE checkout. It is NOT the legal
-  packet itself — it's a clean, print-friendly receipt that proves the
-  $30 test payment happened and lists the packet sections the real
-  document will contain once the packet flow is finished.
+  Shown after a successful TEST-MODE checkout. The receipt proves the
+  $30 test payment happened; the "Download printable packet" button
+  builds the packet through the real pipeline (buildPacket →
+  packetToPrintableHtml) from staging demo answers — the same gates
+  (receipt validity, pre-flight, output completeness) that guard the
+  production path.
 
   Every copy line states TEST MODE / no real money moved.
   Svelte escapes interpolated text, so receipt fields cannot inject HTML.
 -->
 <script>
+  import { buildPacket, downloadPacketHtml, PACKET_ERROR_CODES } from "../lib/packet.js";
+  import { TEST_PROVIDER } from "../lib/payments/test-provider.js";
+  import { STAGING_DEMO_ANSWERS } from "../lib/staging-demo-answers.js";
+
   /** @type {{ id: string, paymentIntentId: string, amount: number, currency: string, cardLast4: string, paidAt: string, productId?: string } | null} */
   let { receipt = null, onback = () => {} } = $props();
+
+  /** Honest inline error from the packet build — resets on every attempt. */
+  let packetError = $state("");
+
+  /**
+   * Build the paid packet from the test receipt and download it as a
+   * standalone printable HTML document. Guards in packet.js throw first:
+   * an invalid receipt (PACKET_UNPAID) or a failed pre-flight can never
+   * produce packet bytes.
+   */
+  function downloadPacket() {
+    packetError = "";
+    try {
+      const packet = buildPacket(TEST_PROVIDER, receipt, STAGING_DEMO_ANSWERS);
+      downloadPacketHtml(packet);
+    } catch (err) {
+      const code = err && err.code ? ` (${err.code})` : "";
+      packetError = `The packet could not be built: ${err && err.message ? err.message : "unknown error"}${code}`;
+    }
+  }
 
   /** Packet sections the real document will carry (placeholders until the packet flow is done). */
   const PACKET_SECTIONS = [
@@ -91,21 +117,40 @@
       </div>
     </dl>
 
-    <h2 class="mt-8 text-base sm:text-lg font-bold">Packet sections (stub)</h2>
+    <h2 class="mt-8 text-base sm:text-lg font-bold">Your packet (staging preview)</h2>
     <p class="mt-1 text-xs sm:text-sm text-neutral-500">
-      The printable legal packet is still being built. Your paid receipt
-      unlocks these sections when the packet flow ships:
+      The packet below is built from <strong>staging demo answers</strong>
+      (test-mode fixture — the fake "Sample" parties) so the $30 flow can
+      be exercised end to end. Real questionnaire answers will flow
+      through here when intake ships. Every line says TEST MODE until
+      then.
     </p>
     <ol class="mt-3 list-decimal space-y-1.5 pl-6 text-sm sm:text-base">
       {#each PACKET_SECTIONS as section}
         <li class="text-neutral-700">
           {section}
-          <span class="text-neutral-400">— placeholder</span>
+          <span class="text-neutral-400">— in the downloaded packet</span>
         </li>
       {/each}
     </ol>
 
+    {#if packetError}
+      <p
+        role="alert"
+        class="no-print mt-4 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs sm:text-sm text-red-800 break-words"
+      >
+        {packetError}
+      </p>
+    {/if}
+
     <div class="no-print mt-8 flex flex-col sm:flex-row gap-3">
+      <button
+        type="button"
+        onclick={downloadPacket}
+        class="rounded-xl bg-[#ff3344] px-5 py-2.5 text-sm sm:text-base font-bold text-white hover:bg-[#ff5566] transition-colors"
+      >
+        Download printable packet (test mode)
+      </button>
       <button
         type="button"
         onclick={printReceipt}

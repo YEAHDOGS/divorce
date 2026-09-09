@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, fireEvent, screen, cleanup } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import PacketReceiptStub from './PacketReceiptStub.svelte';
 
 afterEach(() => cleanup());
@@ -19,6 +20,8 @@ const RECEIPT = {
   cardLast4: '4242',
   paidAt: '2026-09-09T14:00:00.000Z',
   productId: 'uncontested_packet',
+  status: 'succeeded',
+  testMode: true,
 };
 
 describe('PacketReceiptStub', () => {
@@ -30,11 +33,53 @@ describe('PacketReceiptStub', () => {
     expect(screen.getAllByText(/TEST MODE/i).length).toBeGreaterThanOrEqual(2);
   });
 
-  it('lists the placeholder packet sections', () => {
+  it('lists the packet sections and says they come from staging demo answers', () => {
     render(PacketReceiptStub, { props: { receipt: RECEIPT } });
     expect(screen.getByText(/Petition for divorce/)).not.toBeNull();
     expect(screen.getByText(/Filing instructions/)).not.toBeNull();
-    expect(screen.getAllByText(/placeholder/)).not.toHaveLength(0);
+    expect(screen.getByText(/staging demo answers/i)).not.toBeNull();
+    expect(screen.queryAllByText(/placeholder/).length).toBe(0);
+  });
+
+  it('Download button builds the packet and triggers a file download', () => {
+    const createObjectURL = vi.fn(() => 'blob:fake-packet');
+    const revokeObjectURL = vi.fn();
+    globalThis.URL.createObjectURL = createObjectURL;
+    globalThis.URL.revokeObjectURL = revokeObjectURL;
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const appendSpy = vi.spyOn(document.body, 'appendChild');
+
+    render(PacketReceiptStub, { props: { receipt: RECEIPT } });
+    fireEvent.click(screen.getByRole('button', { name: /download printable packet/i }));
+
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(clickSpy).toHaveBeenCalled();
+    // The anchor downloads as the packet id, derived from the receipt id.
+    const anchor = appendSpy.mock.calls
+      .map((args) => args[0])
+      .find((el) => el instanceof HTMLAnchorElement && el.download);
+    expect(anchor && anchor.download).toBe('pkt_rcpt_test_abc123.html');
+
+    clickSpy.mockRestore();
+    appendSpy.mockRestore();
+  });
+
+  it('shows an honest error when the receipt cannot unlock the packet', async () => {
+    render(
+      PacketReceiptStub,
+      { props: { receipt: { ...RECEIPT, id: 'rcpt_not_real', testMode: false } } }
+    );
+    fireEvent.click(screen.getByRole('button', { name: /download printable packet/i }));
+    await tick();
+    expect(screen.getByRole('alert').textContent).toMatch(/could not be built/i);
+    expect(screen.getByRole('alert').textContent).toMatch(/PACKET_UNPAID/);
+  });
+
+  it('offers no packet download without a receipt', () => {
+    render(PacketReceiptStub, { props: { receipt: null } });
+    expect(
+      screen.queryByRole('button', { name: /download printable packet/i })
+    ).toBeNull();
   });
 
   it('shows the honest no-receipt copy when nothing was paid', () => {
