@@ -4,31 +4,36 @@
    *
    * ══════════════════════════════════════════════════════════════
    *  TEST MODE ONLY. NO REAL MONEY MOVES HERE. See
-   *  src/lib/stripe-test.js. The card form is a simulated input:
-   *  never enter real card details.
+   *  src/lib/payments/. The card form is a simulated input:
+   *  never enter real card details. Payment goes through the
+   *  provider adapter (getProvider(ACTIVE_PROVIDER_NAME)) — when
+   *  Brandon picks a real provider, only payments/index.js changes.
    * ══════════════════════════════════════════════════════════════
    *
    * Flow: idle → processing (simulated 1.2s) → success (receipt) or
    * error (test decline). Emits:
-   *   onsuccess(receipt) — with the test receipt object
+   *   onsuccess(receipt) — with the provider receipt object
    *   onclose()          — when the user cancels/closes
    *
-   * Props: open (bool). Logic is delegated to src/lib/stripe-test.js
-   * so this component stays purely presentational.
+   * Props: open (bool). Logic is delegated to the payments adapter so
+   * this component stays purely presentational.
    */
   import { t } from "svelte-i18n";
   import { get } from "svelte/store";
   import {
     PRODUCT,
     TEST_CARD,
-    createTestPaymentIntent,
-    confirmTestPayment,
     sanitizeCardDigits,
     isValidTestExpiry,
     isValidTestCvc,
-  } from "../../lib/stripe-test.js";
+    getProvider,
+    ACTIVE_PROVIDER_NAME,
+  } from "../../lib/payments/index.js";
 
   let { open = false, onsuccess = null, onclose = null } = $props();
+
+  /** The active payment provider (today: TestProvider, test mode). */
+  const provider = getProvider(ACTIVE_PROVIDER_NAME);
 
   let phase = $state("idle"); // idle | processing | success | error
   let receipt = $state(null);
@@ -82,10 +87,12 @@
     errorMsg = "";
     const last4 = digits.slice(-4);
     // Simulated network latency so the processing state is visible.
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
-        const intent = createTestPaymentIntent(PRODUCT.amountCents);
-        const r = confirmTestPayment(intent.id, { last4 });
+        const r = await provider.createPayment(PRODUCT.amountCents, PRODUCT.currency, {
+          productId: PRODUCT.id,
+          cardLast4: last4,
+        });
         receipt = r;
         phase = "success";
       } catch (e) {
@@ -125,14 +132,17 @@
     <div
       class="no-print relative my-auto w-full max-w-sm sm:max-w-md md:max-w-lg rounded-3xl border border-white/10 bg-[#0e0e12] p-6 sm:p-8 shadow-2xl shadow-black/60"
     >
-      <!-- Test-mode banner: always visible, never removable -->
-      <div
-        class="mb-4 sm:mb-5 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-2.5 text-center"
-      >
-        <p class="text-[11px] sm:text-xs font-bold uppercase tracking-widest text-amber-300">
-          {$t("checkout.test_banner")}
-        </p>
-      </div>
+      <!-- Test-mode banner: shown whenever the active provider is in
+           test mode; never removable while a test provider is active -->
+      {#if provider.testMode}
+        <div
+          class="mb-4 sm:mb-5 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-2.5 text-center"
+        >
+          <p class="text-[11px] sm:text-xs font-bold uppercase tracking-widest text-amber-300">
+            {$t("checkout.test_banner")}
+          </p>
+        </div>
+      {/if}
 
       {#if phase === "success" && receipt}
         <div class="text-center">
