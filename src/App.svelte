@@ -7,12 +7,10 @@
   import PricingCard from "./components/landing/PricingCard.svelte";
   import FaqSection from "./components/landing/FaqSection.svelte";
   import DisclaimerFooter from "./components/landing/DisclaimerFooter.svelte";
-  import QuestionnairePreview from "./components/questionnaire/QuestionnairePreview.svelte";
+  import QuestionnaireFlow from "./components/questionnaire/QuestionnaireFlow.svelte";
 
-  // View router. "questionnaire" mounts the TEMPORARY presentational preview
-  // (see QuestionnairePreview.svelte for the coordinator's wiring contract).
-  // Once src/lib/questionnaire.js lands, the coordinator replaces the
-  // preview mount with the real engine-driven flow.
+  // View router. "questionnaire" mounts the engine-driven questionnaire flow
+  // (src/lib/questionnaire.js + presentational components).
   let view = $state("landing");
 
   /** Open the questionnaire preview and reset scroll to the top. */
@@ -61,12 +59,12 @@
       </p>
     </div>
   {:else if view === "questionnaire"}
-    <!-- Questionnaire preview (temporary; see wiring contract in the component) -->
+    <!-- Questionnaire flow (engine-driven) -->
     <div class="no-print">
       <NavBar onstart={openQuestionnaire} />
     </div>
     <div class="relative z-10 mx-auto max-w-7xl 2xl:max-w-[90rem] px-4 sm:px-6 md:px-8 py-8 sm:py-12 md:py-14">
-      <QuestionnairePreview onexit={closeQuestionnaire} />
+      <QuestionnaireFlow onexit={closeQuestionnaire} />
     </div>
   {:else}
     <!-- Landing page -->
