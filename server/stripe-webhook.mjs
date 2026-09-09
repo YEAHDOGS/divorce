@@ -1032,9 +1032,16 @@ export function createPacketDownloadHandler({ dataDir = DEFAULT_DATA_DIR, getDow
  * left untouched — this is the one the end-to-end drill uses.
  */
 export function startCheckoutServer({ port = 8787, env = process.env, dataDir = DEFAULT_DATA_DIR } = {}) {
+  // Fail fast: resolve BOTH signing secrets BEFORE the socket opens.
+  // A missing or weak secret is a deploy-time misconfiguration — the
+  // server must refuse to boot rather than come up in an accept-anything
+  // (or 500-every-webhook) state. Throws WebhookError synchronously.
+  const webhookSecret = loadWebhookSecret(env);
+  const downloadSecret = loadDownloadSecret(env);
+
   const intentHandler = createPaymentIntentHandler({ getStripeClient: () => loadStripeClient(env) });
   const webhookHandler = createWebhookHandler({
-    getWebhookSecret: () => loadWebhookSecret(env),
+    getWebhookSecret: () => webhookSecret,
     dataDir,
   });
   const sessionHandler = createCheckoutSessionHandler({ dataDir });
@@ -1045,12 +1052,12 @@ export function startCheckoutServer({ port = 8787, env = process.env, dataDir = 
     env,
   });
   const downloadTokenHandler = createPacketDownloadTokenHandler({
-    getDownloadSecret: () => loadDownloadSecret(env),
+    getDownloadSecret: () => downloadSecret,
     dataDir,
   });
   const downloadHandler = createPacketDownloadHandler({
     dataDir,
-    getDownloadSecret: () => loadDownloadSecret(env),
+    getDownloadSecret: () => downloadSecret,
   });
   const limiter = createRateLimiter();
 
