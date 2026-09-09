@@ -17,11 +17,13 @@
    * so this component stays purely presentational.
    */
   import { t } from "svelte-i18n";
+  import { get } from "svelte/store";
   import {
     PRODUCT,
     TEST_CARD,
     createTestPaymentIntent,
     confirmTestPayment,
+    sanitizeCardDigits,
   } from "../../lib/stripe-test.js";
 
   let { open = false, onsuccess = null, onclose = null } = $props();
@@ -32,6 +34,13 @@
   let cardNumber = $state(TEST_CARD.number);
   let cardExp = $state(TEST_CARD.exp);
   let cardCvc = $state(TEST_CARD.cvc);
+  /** Locale lookup outside markup (get(t) is rune-safe). */
+  const tr = (key) => get(t)(key);
+
+  /** Strip non-digits as the user types; keeps the fixture consistent. */
+  function handleCardInput(e) {
+    cardNumber = sanitizeCardDigits(e.currentTarget.value);
+  }
 
   /** Reset transient state when the dialog opens. */
   function resetForOpen() {
@@ -47,15 +56,18 @@
     if (open) resetForOpen();
   });
 
-  function last4Of(number) {
-    const digits = String(number).replace(/\D/g, "");
-    return digits.slice(-4) || "4242";
-  }
-
   function handlePay() {
+    // Never silently default to the test card: an empty/invalid field is
+    // a user error, not a payment attempt.
+    const digits = String(cardNumber).replace(/\D/g, "");
+    if (digits.length < 4) {
+      errorMsg = tr("checkout.card_invalid");
+      phase = "error";
+      return;
+    }
     phase = "processing";
     errorMsg = "";
-    const last4 = last4Of(cardNumber);
+    const last4 = digits.slice(-4);
     // Simulated network latency so the processing state is visible.
     setTimeout(() => {
       try {
@@ -162,6 +174,8 @@
             <input
               type="text"
               bind:value={cardNumber}
+              oninput={handleCardInput}
+              maxlength="19"
               inputmode="numeric"
               autocomplete="off"
               aria-label={$t("checkout.card_label")}
