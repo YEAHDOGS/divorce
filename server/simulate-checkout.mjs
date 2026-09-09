@@ -26,6 +26,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHmac } from 'node:crypto';
+import { classifyPaymentFailure, FAILURE_KINDS } from '../src/lib/payments/failure-copy.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -67,6 +68,7 @@ function parseArgs(argv) {
     else if (a === '--out') args.outDir = argv[++i];
     else if (a === '--spawn') args.spawn = true;
     else if (a === '--resend') args.resend = true;
+    else if (a === '--decline') args.decline = true;
     else if (a === '--help' || a === '-h') args.help = true;
     else die(`unknown argument: ${a}`);
   }
@@ -87,6 +89,9 @@ options:
   --out <dir>      where to save the packet HTML (default: cwd)
   --spawn          start the checkout server as a child process for the drill
   --resend         deliver the webhook event twice to prove dedupe
+  --decline        deliver a payment_failed event instead: proves no packet,
+                   no receipt, and prints the honest recovery copy the
+                   payer would see
   --help           this text
 
 Drives the whole staging flow end-to-end without Stripe: session intake →
@@ -173,7 +178,11 @@ async function main() {
       metadata: { packet_id: sessionId },
       charges: { data: [{ payment_method_details: { card: { last4: '4242' } } }] },
     };
-    const event = { id: eventId, object: 'event', type: 'payment_intent.succeeded', data: { object: intent } };
+    const event = args.decline
+      ? // Declined-payment drill: the provider reports failure. The server
+        // must record it as ignored, mint NO packet and NO receipt.
+        { id: eventId, object: 'event', type: 'payment_intent.payment_failed', data: { object: intent } }
+      : { id: eventId, object: 'event', type: 'payment_intent.succeeded', data: { object: intent } };
     const rawBody = JSON.stringify(event);
     const timestamp = Math.floor(Date.now() / 1000);
     const sig = createHmac('sha256', args.secret).update(`${timestamp}.${rawBody}`, 'utf8').digest('hex');
@@ -190,6 +199,27 @@ async function main() {
     const hookRes = await deliver();
     const hookJson = await hookRes.json();
     if (!hookRes.ok) die(`webhook rejected: ${hookRes.status} ${JSON.stringify(hookJson)}`);
+
+    if (args.decline) {
+      // Declined-payment drill: prove the failure path is honest.
+      if (hookJson.ignored !== 'payment_intent.payment_failed')
+        die(`expected payment_failed to be ignored, got ${JSON.stringify(hookJson)}`);
+      log('    payment_failed recorded as ignored — no packet, no receipt');
+      const checkRes = await fetch(`${base}/api/packet/${paymentIntentId}`);
+      if (checkRes.status !== 404) die(`declined payment must leave NO packet (got ${checkRes.status})`);
+      log('    GET /api/packet → 404: the declined payment cannot unlock a download');
+      // Show the recovery copy the checkout modal presents for a decline.
+      const copy = classifyPaymentFailure({ code: 'DECLINED' }, { testMode: true });
+      if (copy.kind !== FAILURE_KINDS.DECLINED || copy.charged !== 'no')
+        die('failure copy did not classify the decline honestly');
+      log('    payer sees:');
+      log(`      ${copy.headline}`);
+      log(`      ${copy.detail}`);
+      log(`      ${copy.recovery}`);
+      log('DONE — decline drill complete: failed payment → honest copy, zero packet, zero receipt.');
+      return;
+    }
+
     if (hookJson.rejected) die(`payment rejected by server: ${hookJson.rejected}`);
     log(`    fulfilled: packetId=${hookJson.packetId} receiptId=${hookJson.receiptId}`);
 
