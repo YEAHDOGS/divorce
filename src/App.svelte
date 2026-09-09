@@ -20,7 +20,7 @@
 </svelte:head>
 
 <main
-  class="h-100dvh max-h-100dvh w-full flex flex-col justify-between bg-[#050508] text-white p-4 sm:p-6 md:p-8 lg:p-12 select-none overflow-hidden relative"
+  class="h-dvh max-h-dvh w-full flex flex-col justify-between bg-[#050508] text-white p-4 sm:p-6 md:p-8 lg:p-12 select-none overflow-hidden relative"
 >
   <!-- Subtle Glowing background grids -->
   <div
@@ -121,31 +121,31 @@
           </p>
         </div>
 
-        <!-- Responsive Layout Feature Card -->
+        <!-- Built-for-agreement Feature Card -->
         <div
           class="p-4 bg-[#0e0e12]/60 hover:bg-[#14141a]/80 border border-white/5 hover:border-[#ff3344]/30 rounded-xl transition-all duration-300 group"
         >
           <h3
             class="text-xs sm:text-sm font-bold tracking-wide mb-1 group-hover:text-[#ff3344] transition-colors duration-300"
           >
-            {$t("app.features.responsive")}
+            {$t("app.features.simple")}
           </h3>
           <p class="text-[10px] sm:text-xs text-neutral-500 leading-relaxed">
-            {$t("app.features.responsive_desc")}
+            {$t("app.features.simple_desc")}
           </p>
         </div>
 
-        <!-- Styles Feature Card -->
+        <!-- Private-by-design Feature Card -->
         <div
           class="p-4 bg-[#0e0e12]/60 hover:bg-[#14141a]/80 border border-white/5 hover:border-[#ff3344]/30 rounded-xl transition-all duration-300 group"
         >
           <h3
             class="text-xs sm:text-sm font-bold tracking-wide mb-1 group-hover:text-[#ff3344] transition-colors duration-300"
           >
-            {$t("app.features.styles")}
+            {$t("app.features.private")}
           </h3>
           <p class="text-[10px] sm:text-xs text-neutral-500 leading-relaxed">
-            {$t("app.features.styles_desc")}
+            {$t("app.features.private_desc")}
           </p>
         </div>
       </div>
@@ -159,7 +159,7 @@
         &copy; {new Date().getFullYear()}
         {$t("app.title")}. {$t("app.footer.made_by")}
         <a
-          href="https://cptnbrando.com"
+          href="https://wearedogs.net"
           target="_blank"
           rel="noopener noreferrer"
           class="hover:text-white underline transition-colors duration-300"
