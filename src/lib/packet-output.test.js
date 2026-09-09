@@ -15,6 +15,8 @@ import { getProvider, PRODUCT } from './payments/index.js';
 import {
   PACKET_OUTPUT_FIELDS,
   PacketOutputError,
+  PRINT_CSS,
+  DEFAULT_PACKET_LABELS,
   assertPacketOutputComplete,
   buildPacket,
   packetToPrintableHtml,
@@ -252,5 +254,89 @@ describe('printed page structure', () => {
     const signBlock = html.slice(html.indexOf('<div class="sign">'), html.indexOf('</section>', html.indexOf('<div class="sign">')));
     expect(signBlock).toContain('Petitioner signature');
     expect(signBlock).toContain('Respondent signature');
+  });
+});
+
+/* ── Cover page + page numbers + section order (printable packet) ─── */
+
+describe('cover page and page numbers', () => {
+  /** Sections in the document order the cover contents list promises. */
+  const SECTION_TITLES = [
+    DEFAULT_PACKET_LABELS.paymentTitle,
+    DEFAULT_PACKET_LABELS.partiesTitle,
+    DEFAULT_PACKET_LABELS.marriageTitle,
+    DEFAULT_PACKET_LABELS.filingTitle,
+    DEFAULT_PACKET_LABELS.attestationsTitle,
+    DEFAULT_PACKET_LABELS.checklistTitle,
+    DEFAULT_PACKET_LABELS.signaturesTitle,
+  ];
+
+  it('the packet opens with a cover section carrying the title block', async () => {
+    const packet = await paidPacket();
+    const html = packetToPrintableHtml(packet);
+    const firstSection = html.indexOf('<section>');
+    const coverDiv = html.indexOf('<div class="cover">');
+    expect(firstSection, 'document starts with a section').toBeGreaterThan(-1);
+    expect(coverDiv, 'cover block exists').toBeGreaterThan(firstSection);
+    const cover = html.slice(firstSection, html.indexOf('</section>', firstSection));
+    expect(cover).toContain(DEFAULT_PACKET_LABELS.documentTitle);
+    expect(cover).toContain('Alex Rivera');
+    expect(cover).toContain('Jordan Rivera');
+    expect(cover).toContain(packet.packetId);
+    expect(cover).toContain(packet.generatedAt);
+  });
+
+  it('the cover lists every section title, in document order', async () => {
+    const packet = await paidPacket();
+    const html = packetToPrintableHtml(packet);
+    const firstSection = html.indexOf('<section>');
+    const cover = html.slice(firstSection, html.indexOf('</section>', firstSection));
+    expect(cover).toContain(`<h2>${DEFAULT_PACKET_LABELS.coverContentsLabel}</h2>`);
+    let cursor = 0;
+    for (const title of SECTION_TITLES) {
+      const at = cover.indexOf(`<li>${title}</li>`, cursor);
+      expect(at, `cover lists "${title}" in order`).toBeGreaterThan(-1);
+      cursor = at;
+    }
+  });
+
+  it('body sections render in the same order the cover promises', async () => {
+    const packet = await paidPacket();
+    const html = packetToPrintableHtml(packet);
+    let cursor = 0;
+    for (const title of SECTION_TITLES) {
+      const at = html.indexOf(`<h2>${title}</h2>`, cursor);
+      expect(at, `"${title}" renders in document order`).toBeGreaterThan(-1);
+      cursor = at;
+    }
+  });
+
+  it('every printed page carries a "Page X of Y" footer', () => {
+    expect(PRINT_CSS, 'page-number margin box').toContain('@bottom-center');
+    expect(PRINT_CSS, 'page counter').toContain('counter(page)');
+    expect(PRINT_CSS, 'total-pages counter').toContain('counter(pages)');
+  });
+
+  it('the cover breaks onto its own page', () => {
+    expect(PRINT_CSS, 'cover break rule').toMatch(/\.cover\s*\{[^}]*break-after:\s*page/);
+  });
+
+  it('no section is empty: every section carries content beyond its heading', async () => {
+    const packet = await paidPacket();
+    const html = packetToPrintableHtml(packet);
+    const bodies = [...html.matchAll(/<section>([\s\S]*?)<\/section>/g)].map((m) => m[1]);
+    expect(bodies.length, 'sections render').toBeGreaterThan(0);
+    for (const body of bodies) {
+      const withoutHeading = body.replace(/<h1>[\s\S]*?<\/h1>/, '').replace(/<h2>[\s\S]*?<\/h2>/, '');
+      const text = withoutHeading.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      expect(text.length, 'section carries content').toBeGreaterThan(20);
+    }
+  });
+
+  it('the render self-guard still validates the document after the cover change', async () => {
+    const packet = await paidPacket();
+    const html = packetToPrintableHtml(packet);
+    expect(validatePacketOutput(html, packet)).toEqual([]);
+    expect(assertPacketOutputComplete(html, packet)).toBe(true);
   });
 });
