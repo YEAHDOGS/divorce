@@ -58,9 +58,12 @@ Expected: `200` with `paymentIntentId`, `clientSecret`, `amountCents: 3000`.
 
 ## What's still needed from you
 
-- [ ] Paste `sk_test_...` into `.env` as above
+- [x] Paste `sk_test_...` into `.env` as above
 - [ ] Run the drill, confirm the $30 test payment in the dashboard
-- [ ] Say the word and the frontend "Pay $30" button gets wired to this endpoint
+- [x] Frontend "Pay $30" button wired (2026-09-09): `CheckoutModal.svelte`
+      (branch `jack/divorce-checkout-modal`) — test-card form wired through
+      the provider adapter (`runCheckout` in `src/lib/checkout.js`), staging
+      badge, honest failure copy. Test mode only; no real money moves.
 
 ## The $30 drill WITHOUT Stripe (no keys, no network, no card)
 
