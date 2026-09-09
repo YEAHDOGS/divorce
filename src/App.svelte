@@ -2,6 +2,7 @@
   import { t, isLoading } from "svelte-i18n";
   import LanguageSelector from "./components/LanguageSelector.svelte";
   import CheckoutModal from "./components/CheckoutModal.svelte";
+  import PacketReceiptStub from "./components/PacketReceiptStub.svelte";
 
   // Import SVG assets as static resource URLs
   import logo from "./assets/logo.svg";
@@ -13,9 +14,11 @@
   // Staging checkout state: the modal is the $30 money step of the demo.
   let checkoutOpen = $state(false);
   let lastReceipt = $state(null);
+  let receiptView = $state(false);
 
   function handleCheckoutSuccess(receipt) {
     lastReceipt = receipt;
+    receiptView = false;
   }
 </script>
 
@@ -174,13 +177,25 @@
           Pay $30 — staging checkout
         </button>
       </div>
+    {:else if receiptView}
+      <div class="w-full mx-auto {APP_MAX_WIDTH} z-10 mb-3 max-h-[50vh] overflow-y-auto">
+        <PacketReceiptStub receipt={lastReceipt} onback={() => (receiptView = false)} />
+      </div>
     {:else}
       <div
-        class="w-full mx-auto {APP_MAX_WIDTH} flex items-center justify-center z-10 mb-3"
+        class="w-full mx-auto {APP_MAX_WIDTH} flex items-center justify-center gap-3 z-10 mb-3"
       >
         <p class="text-xs sm:text-sm text-emerald-300 font-mono">
           Paid (test mode, no money moved) — receipt {lastReceipt.id}
         </p>
+        <button
+          type="button"
+          onclick={() => (receiptView = true)}
+          class="rounded-lg border border-white/20 px-3 py-1.5 text-xs sm:text-sm font-semibold text-white
+                 hover:bg-white/10 transition-colors"
+        >
+          View / print receipt (test mode)
+        </button>
       </div>
     {/if}
 
