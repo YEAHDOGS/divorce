@@ -80,6 +80,15 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Placeholder when the event carries no card last-4 — never a real PAN. */
 const UNKNOWN_LAST4 = '----';
 
+/**
+ * Minimum accepted webhook/token secret length. Stripe's real endpoint
+ * secrets are `whsec_` + 32 bytes of entropy; anything this short cannot
+ * be a real secret — it is a typo, a placeholder, or a debug leftover.
+ * Accepting it would let an attacker brute-force or guess the HMAC key,
+ * so weak secrets fail closed exactly like missing ones.
+ */
+const MIN_WEBHOOK_SECRET_LENGTH = 16;
+
 export const WEBHOOK_ERROR_CODES = Object.freeze({
   ...ERROR_CODES,
   WEBHOOK_SECRET_MISSING: 'WEBHOOK_SECRET_MISSING',
@@ -131,6 +140,28 @@ function fail(code, message) {
   throw new WebhookError(code, message);
 }
 
+/**
+ * Fail closed on missing OR weak secrets. A short secret is worse than
+ * none: "none" breaks loudly, while a guessable secret silently turns
+ * signature verification into theater. Both throw WEBHOOK_SECRET_MISSING
+ * so callers need one fail-closed branch.
+ */
+function assertSecretStrong(secret, what) {
+  if (typeof secret !== 'string' || secret.length === 0) {
+    fail(
+      WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING,
+      `${what}: secret is not set — cannot verify signatures.`
+    );
+  }
+  if (secret.length < MIN_WEBHOOK_SECRET_LENGTH) {
+    fail(
+      WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING,
+      `${what}: secret is too short (${secret.length} chars, need ${MIN_WEBHOOK_SECRET_LENGTH}+) — ` +
+        'a guessable HMAC key fails verification security. Set a real webhook secret.'
+    );
+  }
+}
+
 /* ── Webhook secret (test-mode safe) ─────────────────────────────── */
 
 /**
@@ -147,12 +178,7 @@ export function loadWebhookSecret(env = process.env) {
     );
   }
   const secret = env.STRIPE_WEBHOOK_SECRET;
-  if (typeof secret !== 'string' || secret.length === 0) {
-    fail(
-      WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING,
-      'webhook: STRIPE_WEBHOOK_SECRET is not set — cannot verify signatures.'
-    );
-  }
+  assertSecretStrong(secret, 'webhook: STRIPE_WEBHOOK_SECRET');
   return secret;
 }
 
@@ -172,12 +198,7 @@ export function loadDownloadSecret(env = process.env) {
     );
   }
   const secret = env.DOWNLOAD_TOKEN_SECRET || env.STRIPE_WEBHOOK_SECRET;
-  if (typeof secret !== 'string' || secret.length === 0) {
-    fail(
-      WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING,
-      'download tokens: no secret set — set DOWNLOAD_TOKEN_SECRET or STRIPE_WEBHOOK_SECRET.'
-    );
-  }
+  assertSecretStrong(secret, 'download tokens: DOWNLOAD_TOKEN_SECRET / STRIPE_WEBHOOK_SECRET');
   return secret;
 }
 
