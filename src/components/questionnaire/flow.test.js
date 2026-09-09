@@ -116,18 +116,32 @@ describe('QuestionnaireFlow engine wiring', () => {
     const noValues = await screen.findAllByText('No');
     expect(noValues.length).toBeGreaterThanOrEqual(1); // no minor children
 
-    // Test-mode checkout unlocks the paid packet: fixtures only, no network.
+    // Test-mode checkout assembles the paid packet page: fixtures only,
+    // no network. Success jumps straight to the customer's packet.
     await fireEvent.click(await screen.findByRole('button', { name: 'Pay $30 to unlock your printable packet' }));
     await screen.findByText('Test mode — no real money moves');
     await fireEvent.click(await screen.findByRole('button', { name: /^Pay \$30 — test$/ }));
     await screen.findByText('Test payment succeeded', {}, { timeout: 8000 });
-    await screen.findByText('rcpt_test_', {}, { selector: 'dd' }).catch(() => {});
     await fireEvent.click(await screen.findByRole('button', { name: 'Continue to your packet' }));
 
-    // Paid state: receipt badge + print action, all under test-mode ids.
+    // Paid packet page: heading, test badge, receipt block, every section
+    // the customer told us — all under test-mode ids.
+    await screen.findByText('Your divorce packet');
+    await screen.findByText('TEST MODE — no real charge');
+    await screen.findByText('Jane Doe');
+    await screen.findByText('Harris County');
+    // Receipt id shows on the packet (receipt block + packet id line).
+    const receiptLines = await screen.findAllByText(/rcpt_test_\d+/);
+    expect(receiptLines.length).toBeGreaterThanOrEqual(1);
+    await screen.findByText('Signatures');
+    await screen.findByRole('button', { name: 'Print packet' });
+    await screen.findByRole('button', { name: 'Download packet' });
+
+    // Back to the organizer preview works; the packet page is reachable
+    // again from the paid badge.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Back to organizer preview' }));
     await screen.findByText('Paid — test mode');
-    const receiptLine = await screen.findByText(/rcpt_test_\d+/);
-    expect(receiptLine).toBeInTheDocument();
-    await screen.findByRole('button', { name: 'Print my packet' });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Continue to your packet' }));
+    await screen.findByText('Your divorce packet');
   });
 });
