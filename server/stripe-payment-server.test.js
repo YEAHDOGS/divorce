@@ -5,6 +5,7 @@
  * client through the getStripeClient factory. No network access.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { MAX_BODY_BYTES } from './request-limits.mjs';
 import {
   PRODUCT,
   ERROR_CODES,
@@ -304,5 +305,27 @@ describe('regression sanity', () => {
   it('runs the full promised battery', () => {
     // placeholder guard so the file fails loudly if the suite shrinks
     expect(FIFTY).toBe(50);
+  });
+});
+
+describe('createPaymentIntentHandler body limits', () => {
+  it('413s an oversized body and never calls Stripe', async () => {
+    const { client } = mockStripe();
+    const res = await post(createPaymentIntentHandler({ getStripeClient: async () => client }), {
+      body: 'x'.repeat(MAX_BODY_BYTES + 1),
+    });
+    expect(res.status).toBe(413);
+    expect(res.json().error.code).toBe(ERROR_CODES.BODY_TOO_LARGE);
+    expect(client.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  it('lets a body exactly at the cap through to validation', async () => {
+    const { client } = mockStripe();
+    const res = await post(createPaymentIntentHandler({ getStripeClient: async () => client }), {
+      body: 'x'.repeat(MAX_BODY_BYTES),
+    });
+    // Cap passed; fails downstream on invalid JSON — not on size.
+    expect(res.status).not.toBe(413);
+    expect(res.json().error.code).toBe(ERROR_CODES.INVALID_BODY);
   });
 });
