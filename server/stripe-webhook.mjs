@@ -30,7 +30,9 @@
  *    throws PACKET_UNPAID for anything else — the gate code is the
  *    second lock, not just the router.
  *  - Failed payments, wrong amounts, and unknown sessions are recorded
- *    in the ledger but produce NO packet and NO receipt.
+ *    in the ledger but produce NO packet and NO receipt. Checkout
+ *    sessions also expire 24h after intake (SESSION_TTL_SEC) — a payment
+ *    for a stale session is rejected like an unknown one.
  *  - Packet download requires a single-use, HMAC-signed, 24h-expiring
  *    download token minted for the exact paid payment intent
  *    (POST /api/packet-token). The payment intent id alone never unlocks
@@ -96,6 +98,7 @@ export const WEBHOOK_ERROR_CODES = Object.freeze({
   SIGNATURE_INVALID: 'SIGNATURE_INVALID',
   EVENT_INVALID: 'EVENT_INVALID',
   SESSION_INVALID: 'SESSION_INVALID',
+  SESSION_EXPIRED: 'SESSION_EXPIRED',
   PACKET_NOT_READY: 'PACKET_NOT_READY',
   PACKET_INTEGRITY_FAILED: 'PACKET_INTEGRITY_FAILED',
   RATE_LIMITED: RATE_LIMIT_ERROR_CODE,
@@ -108,6 +111,15 @@ export const WEBHOOK_ERROR_CODES = Object.freeze({
 /** Download tokens live 24h. A paid customer re-mints free — a single-use
  *  token is consumed by the download it authorizes. */
 export const DOWNLOAD_TOKEN_TTL_SEC = 24 * 60 * 60;
+
+/**
+ * Checkout sessions expire after 24h, mirroring Stripe Checkout's own
+ * session lifetime. The session carries the intake answers the packet is
+ * generated from — a stale session means stale answers, so a payment
+ * arriving for one must NOT unlock a packet; the payer starts over.
+ * Exported so tests pin the policy.
+ */
+export const SESSION_TTL_SEC = 24 * 60 * 60;
 
 /**
  * Privacy headers for the paid-packet download. The packet is a sensitive
@@ -340,6 +352,30 @@ export function loadSession(dataDir, sessionId) {
   const p = ensureDataDir(dataDir);
   if (!sanitizeId(sessionId)) return null;
   return readJsonFile(join(p.sessionsDir, `${sessionId}.json`), null);
+}
+
+/**
+ * Fail closed on a stale or untrustworthy checkout session. The session
+ * carries the intake answers the packet is generated from; a session
+ * without a parseable createdAt is a corrupt record, and one older than
+ * SESSION_TTL_SEC is stale. Either way: no packet, no receipt.
+ */
+function assertSessionFresh(session, nowMs) {
+  const createdAt = Date.parse(session.createdAt);
+  if (!Number.isFinite(createdAt)) {
+    fail(
+      WEBHOOK_ERROR_CODES.SESSION_INVALID,
+      'webhook: checkout session has no usable createdAt — no packet.'
+    );
+  }
+  const ageSeconds = (nowMs() - createdAt) / 1000;
+  if (ageSeconds > SESSION_TTL_SEC) {
+    fail(
+      WEBHOOK_ERROR_CODES.SESSION_EXPIRED,
+      `webhook: checkout session is ${Math.round(ageSeconds / 3600)}h old ` +
+        `(TTL ${SESSION_TTL_SEC / 3600}h) — start a fresh checkout, no packet.`
+    );
+  }
 }
 
 /* Processed events: the idempotency record. One event id → one outcome. */
@@ -688,6 +724,7 @@ export function fulfillSucceededPayment(dataDir, event, intent, { nowMs = () => 
   if (!session) {
     fail(WEBHOOK_ERROR_CODES.SESSION_INVALID, 'webhook: no checkout session for this payment — no packet.');
   }
+  assertSessionFresh(session, nowMs);
 
   const prior = findPaidReceiptByIntent(dataDir, intent.id);
   if (prior) {

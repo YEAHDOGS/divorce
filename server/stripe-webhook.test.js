@@ -46,6 +46,7 @@ import {
   peekDownloadToken,
   consumeDownloadToken,
   DOWNLOAD_TOKEN_TTL_SEC,
+  SESSION_TTL_SEC,
 } from './stripe-webhook.mjs';
 import { buildPacket } from '../src/lib/packet.js';
 import { MAX_BODY_BYTES } from './request-limits.mjs';
@@ -790,6 +791,89 @@ describe('parseEvent / processed events', () => {
     expect(() =>
       fulfillSucceededPayment(dataDir, { id: 'evt_no_sess' }, { id: 'pi_x', amount: 3000, currency: 'usd', metadata: {} })
     ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.SESSION_INVALID }));
+  });
+});
+
+/* ── Checkout session expiry (packet-unlock gate) ───────────────────
+ * The session carries the intake answers the packet is generated from.
+ * A payment for a session older than 24h must not unlock a packet —
+ * stale intake, stale packet. The clock is injectable via nowMs so the
+ * boundary is deterministic, not timing-flaky. */
+
+describe('fulfillSucceededPayment — checkout session expiry', () => {
+  const FIXED_NOW = Date.UTC(2026, 8, 9, 16, 0, 0);
+  const nowMs = () => FIXED_NOW;
+
+  /** Create a session whose createdAt is ageSeconds before FIXED_NOW. */
+  function sessionWithAge(ageSeconds) {
+    const rec = saveSession(dataDir, { email: 'alex@example.com', answers: FIXTURE_ANSWERS });
+    const file = join(dataDir, 'sessions', `${rec.sessionId}.json`);
+    const stored = JSON.parse(readFileSync(file, 'utf8'));
+    stored.createdAt = new Date(FIXED_NOW - ageSeconds * 1000).toISOString();
+    writeFileSync(file, JSON.stringify(stored), 'utf8');
+    return rec.sessionId;
+  }
+
+  it('pins SESSION_TTL_SEC at 24h, mirroring Stripe Checkout session expiry', () => {
+    expect(SESSION_TTL_SEC).toBe(24 * 60 * 60);
+    expect(WEBHOOK_ERROR_CODES.SESSION_EXPIRED).toBe('SESSION_EXPIRED');
+  });
+
+  it('a stale session (older than 24h) throws SESSION_EXPIRED: no packet, no receipt', () => {
+    const sessionId = sessionWithAge(SESSION_TTL_SEC + 1);
+    expect(() =>
+      fulfillSucceededPayment(
+        dataDir,
+        { id: 'evt_stale_1' },
+        { id: 'pi_stale_1', amount: 3000, currency: 'usd', metadata: { packet_id: sessionId } },
+        { nowMs }
+      )
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.SESSION_EXPIRED }));
+    expect(findPaidReceiptByIntent(dataDir, 'pi_stale_1')).toBeNull();
+    expect(existsSync(join(dataDir, 'packets', 'pi_stale_1.html'))).toBe(false);
+  });
+
+  it('the HTTP webhook path records a stale-session payment as rejected and serves no packet', async () => {
+    const sessionId = sessionWithAge(SESSION_TTL_SEC + 3600);
+    const rawBody = succeededEvent({ eventId: 'evt_stale_2', intentId: 'pi_stale_2', sessionId });
+    const res = fakeRes();
+    await webhookHandler()(signedReq(rawBody), res);
+    const body = res.json();
+    expect(res.status).toBe(200);
+    expect(body.received).toBe(true);
+    expect(body.rejected).toBe('SESSION_EXPIRED');
+    expect(findPaidReceiptByIntent(dataDir, 'pi_stale_2')).toBeNull();
+    expect(existsSync(join(dataDir, 'packets', 'pi_stale_2.html'))).toBe(false);
+  });
+
+  it('a session exactly at the TTL boundary still fulfills (boundary is > not >=)', () => {
+    const sessionId = sessionWithAge(SESSION_TTL_SEC);
+    const { packetId, receiptId } = fulfillSucceededPayment(
+      dataDir,
+      { id: 'evt_boundary_1' },
+      { id: 'pi_boundary_1', amount: 3000, currency: 'usd', metadata: { packet_id: sessionId } },
+      { nowMs }
+    );
+    expect(typeof packetId).toBe('string');
+    expect(typeof receiptId).toBe('string');
+    expect(findPaidReceiptByIntent(dataDir, 'pi_boundary_1')).not.toBeNull();
+  });
+
+  it('a session record without a usable createdAt fails closed as SESSION_INVALID', () => {
+    const rec = saveSession(dataDir, { email: 'alex@example.com', answers: FIXTURE_ANSWERS });
+    const file = join(dataDir, 'sessions', `${rec.sessionId}.json`);
+    const stored = JSON.parse(readFileSync(file, 'utf8'));
+    delete stored.createdAt;
+    writeFileSync(file, JSON.stringify(stored), 'utf8');
+    expect(() =>
+      fulfillSucceededPayment(
+        dataDir,
+        { id: 'evt_noclock_1' },
+        { id: 'pi_noclock_1', amount: 3000, currency: 'usd', metadata: { packet_id: rec.sessionId } },
+        { nowMs }
+      )
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.SESSION_INVALID }));
+    expect(findPaidReceiptByIntent(dataDir, 'pi_noclock_1')).toBeNull();
   });
 });
 
