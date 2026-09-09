@@ -100,7 +100,7 @@
     tabindex="-1"
     aria-labelledby="checkout-title"
     onkeydown={handleKeydown}
-    class="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6"
+    class="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto p-4 sm:p-6"
   >
     <button
       type="button"
@@ -110,7 +110,7 @@
     ></button>
 
     <div
-      class="no-print relative w-full max-w-sm sm:max-w-md md:max-w-lg rounded-3xl border border-white/10 bg-[#0e0e12] p-6 sm:p-8 shadow-2xl shadow-black/60"
+      class="no-print relative my-auto w-full max-w-sm sm:max-w-md md:max-w-lg rounded-3xl border border-white/10 bg-[#0e0e12] p-6 sm:p-8 shadow-2xl shadow-black/60"
     >
       <!-- Test-mode banner: always visible, never removable -->
       <div
