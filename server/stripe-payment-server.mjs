@@ -17,6 +17,7 @@
  */
 import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
+import { readRequestBody, BodyTooLargeError, MAX_BODY_BYTES } from './request-limits.mjs';
 
 /** The one and only product: the uncontested divorce packet, fixed price. */
 export const PRODUCT = Object.freeze({
@@ -29,6 +30,7 @@ export const PRODUCT = Object.freeze({
 export const ERROR_CODES = Object.freeze({
   TEST_MODE_VIOLATION: 'TEST_MODE_VIOLATION',
   INVALID_BODY: 'INVALID_BODY',
+  BODY_TOO_LARGE: 'BODY_TOO_LARGE',
   AMOUNT_TAMPER: 'AMOUNT_TAMPER',
   METHOD_NOT_ALLOWED: 'METHOD_NOT_ALLOWED',
   STRIPE_ERROR: 'STRIPE_ERROR',
@@ -145,9 +147,7 @@ export function createPaymentIntentHandler({ getStripeClient }) {
     }
 
     try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const validated = validateBody(Buffer.concat(chunks).toString('utf8') || '{}');
+      const validated = validateBody((await readRequestBody(req, { maxBytes: MAX_BODY_BYTES })) || '{}');
 
       // Client MAY supply an idempotency key; otherwise derive one deterministically.
       const headerKey = req.headers['idempotency-key'];
@@ -167,7 +167,9 @@ export function createPaymentIntentHandler({ getStripeClient }) {
         currency: PRODUCT.currency,
       });
     } catch (e) {
-      if (e.code === ERROR_CODES.INVALID_BODY || e.code === ERROR_CODES.AMOUNT_TAMPER) {
+      if (e instanceof BodyTooLargeError || e.code === ERROR_CODES.BODY_TOO_LARGE) {
+        send(413, { error: { code: ERROR_CODES.BODY_TOO_LARGE, message: e.message } });
+      } else if (e.code === ERROR_CODES.INVALID_BODY || e.code === ERROR_CODES.AMOUNT_TAMPER) {
         send(400, { error: { code: e.code, message: e.message } });
       } else if (e.code === ERROR_CODES.TEST_MODE_VIOLATION) {
         send(403, { error: { code: e.code, message: e.message } });

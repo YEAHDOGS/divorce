@@ -35,6 +35,9 @@
  *    download token minted for the exact paid payment intent
  *    (POST /api/packet-token). The payment intent id alone never unlocks
  *    the packet — knowing the URL is not the same as having paid.
+ *  - Request bodies are capped at 256 KiB (server/request-limits.mjs):
+ *    an oversized POST is rejected with 413 BODY_TOO_LARGE and its socket
+ *    destroyed BEFORE signature verification, so junk can't OOM the box.
  *  - User values are escaped by packetToPrintableHtml; the download
  *    endpoint allowlists the payment-intent id (no path traversal).
  *
@@ -51,6 +54,7 @@ import { fileURLToPath } from 'node:url';
 import { PRODUCT, ERROR_CODES, createPaymentIntentHandler, loadStripeClient } from './stripe-payment-server.mjs';
 import { buildPacket, packetToPrintableHtml } from '../src/lib/packet.js';
 import { createRateLimiter, DEFAULT_RATE_LIMIT, RATE_LIMIT_ERROR_CODE } from './rate-limit.mjs';
+import { readRequestBody, BodyTooLargeError, MAX_BODY_BYTES } from './request-limits.mjs';
 
 /* Exported for tests and for pinning in docs: the staging server's limits. */
 export { DEFAULT_RATE_LIMIT, RATE_LIMIT_ERROR_CODE };
@@ -74,6 +78,7 @@ const UNKNOWN_LAST4 = '----';
 export const WEBHOOK_ERROR_CODES = Object.freeze({
   ...ERROR_CODES,
   WEBHOOK_SECRET_MISSING: 'WEBHOOK_SECRET_MISSING',
+  BODY_TOO_LARGE: 'BODY_TOO_LARGE',
   SIGNATURE_INVALID: 'SIGNATURE_INVALID',
   EVENT_INVALID: 'EVENT_INVALID',
   SESSION_INVALID: 'SESSION_INVALID',
@@ -681,11 +686,7 @@ export function parseEvent(rawBody) {
 /* ── HTTP handlers ───────────────────────────────────────────────── */
 
 function readRawBody(req) {
-  return (async () => {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    return Buffer.concat(chunks).toString('utf8');
-  })();
+  return readRequestBody(req, { maxBytes: MAX_BODY_BYTES });
 }
 
 function sendJson(res, status, payload) {
@@ -748,6 +749,13 @@ export function createWebhookHandler({ getWebhookSecret, dataDir = DEFAULT_DATA_
       markEventProcessed(dataDir, eventId, `ignored:${type}`);
       return sendJson(res, 200, { received: true, eventId, ignored: type });
     } catch (e) {
+      // Body cap fires BEFORE signature verification: an oversized POST is
+      // rejected without ever being parsed or crypto-checked.
+      if (e instanceof BodyTooLargeError) {
+        return sendJson(res, 413, {
+          error: { code: WEBHOOK_ERROR_CODES.BODY_TOO_LARGE, message: e.message },
+        });
+      }
       if (e instanceof WebhookError) {
         const status =
           e.code === WEBHOOK_ERROR_CODES.SIGNATURE_INVALID ||
@@ -777,7 +785,12 @@ export function createCheckoutSessionHandler({ dataDir = DEFAULT_DATA_DIR } = {}
     let body;
     try {
       body = JSON.parse((await readRawBody(req)) || '{}');
-    } catch {
+    } catch (e) {
+      if (e instanceof BodyTooLargeError) {
+        return sendJson(res, 413, {
+          error: { code: WEBHOOK_ERROR_CODES.BODY_TOO_LARGE, message: e.message },
+        });
+      }
       return sendJson(res, 400, {
         error: { code: WEBHOOK_ERROR_CODES.SESSION_INVALID, message: 'Body must be valid JSON.' },
       });
@@ -824,7 +837,12 @@ export function createPacketDownloadTokenHandler({ getDownloadSecret, dataDir = 
     let body;
     try {
       body = JSON.parse((await readRawBody(req)) || '{}');
-    } catch {
+    } catch (e) {
+      if (e instanceof BodyTooLargeError) {
+        return sendJson(res, 413, {
+          error: { code: WEBHOOK_ERROR_CODES.BODY_TOO_LARGE, message: e.message },
+        });
+      }
       return sendJson(res, 400, {
         error: { code: WEBHOOK_ERROR_CODES.EVENT_INVALID, message: 'Body must be valid JSON.' },
       });
