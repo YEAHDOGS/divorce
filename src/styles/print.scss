@@ -1,0 +1,77 @@
+// Print stylesheet: the filing organizer (ReviewScreen .print-area) must
+// print cleanly on paper. Anything carrying .no-print (nav, buttons, hints)
+// is hidden; the organizer flips to high-contrast black-on-white.
+@use "./variables" as *;
+
+@media print {
+  // Chrome that must never reach paper
+  .no-print {
+    display: none !important;
+  }
+
+  // The print-only organizer heading becomes visible
+  .only-print {
+    display: block !important;
+  }
+
+  // Force paper-friendly colors regardless of the dark theme
+  html,
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  main {
+    background: #ffffff !important;
+    color: #000000 !important;
+    display: block !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  .print-area {
+    background: #ffffff !important;
+    color: #000000 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    max-width: 100% !important;
+
+    h3 {
+      color: #000000 !important;
+    }
+
+    dt {
+      color: rgba(0, 0, 0, 0.6) !important;
+    }
+
+    dd {
+      color: #000000 !important;
+    }
+
+    dl,
+    div {
+      border-color: rgba(0, 0, 0, 0.15) !important;
+    }
+  }
+
+  // Keep each organizer section on one page where possible
+  .print-area section {
+    break-inside: avoid;
+  }
+
+  // Hide the decorative background glows
+  main > div[aria-hidden] {
+    display: none !important;
+  }
+
+  @page {
+    margin: 18mm 14mm;
+  }
+}
