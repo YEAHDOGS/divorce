@@ -1026,7 +1026,14 @@ describe('startCheckoutServer rate gating (integration)', () => {
   let base;
 
   beforeEach(async () => {
-    server = startCheckoutServer({ port: 0, dataDir });
+    // The server now fails fast without a signing secret, so every
+    // integration boot passes the fixture secret — the focus here is
+    // rate gating, not secret configuration.
+    server = startCheckoutServer({
+      port: 0,
+      dataDir,
+      env: { ...process.env, STRIPE_WEBHOOK_SECRET: FIXTURE_SECRET },
+    });
     await new Promise((resolve) => server.on('listening', resolve));
     base = `http://127.0.0.1:${server.address().port}`;
   });
@@ -1162,5 +1169,45 @@ describe('request body limits — 256 KiB cap on every POST endpoint', () => {
     await handler(fakeReq({ body: 'z'.repeat(MAX_BODY_BYTES + 1) }), res);
     expect(res.status).toBe(413);
     expect(res.json().error.code).toBe(WEBHOOK_ERROR_CODES.BODY_TOO_LARGE);
+  });
+});
+
+/* ── Startup fail-fast: no secret, no socket ─────────────────────── */
+
+describe('startCheckoutServer secret fail-fast (startup)', () => {
+  it('refuses to boot when STRIPE_WEBHOOK_SECRET is missing — throws before listen', () => {
+    expect(() => startCheckoutServer({ port: 0, dataDir, env: { STRIPE_MODE: 'test' } })).toThrowError(
+      expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING })
+    );
+  });
+
+  it('refuses to boot on a weak secret', () => {
+    expect(() =>
+      startCheckoutServer({
+        port: 0,
+        dataDir,
+        env: { STRIPE_MODE: 'test', STRIPE_WEBHOOK_SECRET: 'too-short' },
+      })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.WEBHOOK_SECRET_MISSING }));
+  });
+
+  it('refuses to boot in live mode without the explicit opt-in', () => {
+    expect(() =>
+      startCheckoutServer({
+        port: 0,
+        dataDir,
+        env: { STRIPE_MODE: 'live', STRIPE_WEBHOOK_SECRET: FIXTURE_SECRET },
+      })
+    ).toThrowError(expect.objectContaining({ code: WEBHOOK_ERROR_CODES.TEST_MODE_VIOLATION }));
+  });
+
+  it('boots fine with a strong fixture secret', async () => {
+    const server = startCheckoutServer({
+      port: 0,
+      dataDir,
+      env: { ...process.env, STRIPE_WEBHOOK_SECRET: FIXTURE_SECRET },
+    });
+    await new Promise((resolve) => server.on('listening', resolve));
+    await new Promise((resolve) => server.close(resolve));
   });
 });
